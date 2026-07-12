@@ -353,6 +353,8 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
 
     # acquisition_time = cpu_ts - latency
     latency_s = data.get("estimated_latency", latency_s)
+    if "estimated_latency_ms" in data and "estimated_latency" not in data:
+        latency_s = data.get("estimated_latency_ms", 0.0) / 1000.0
     latency_ns = int(latency_s * 1e9)
 
     timestamps = data.get("timestamps_ns", data.get("timestamps", data.get("timestamps_ms")))
@@ -363,8 +365,11 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
     if not timestamps and "frames" in data:
         frames = data["frames"]
         if frames and isinstance(frames[0], dict):
-            timestamps = [f.get("cpu_ts", f.get("gst_ts", 0)) for f in frames]
-            gst_timestamps = [f.get("gst_ts", 0) for f in frames]
+            timestamps = [
+                f.get("cpu_ts", f.get("cpu_ns", f.get("gst_ts", f.get("gst_ns", 0))))
+                for f in frames
+            ]
+            gst_timestamps = [f.get("gst_ts", f.get("gst_ns", 0)) for f in frames]
             is_ns = True; is_ms = False
 
     if not timestamps: return
@@ -379,7 +384,7 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
     
     # Calculate video frame indices from gst_ts if available
     # gst_ts is in nanoseconds, convert to frame index using fps
-    video_fps = data.get("fps", 30.0)
+    video_fps = data.get("fps") or 30.0
     if gst_timestamps:
         video_indices = [round(gst_timestamps[i] * video_fps / 1e9) for i in indices]
     else:
@@ -413,6 +418,33 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
             else:
                 process_video_chunk(tasks[0])
 
+def index_videos(index_data):
+    videos = []
+    seen_files = set()
+
+    for video in index_data.get("videos", []) or []:
+        if not isinstance(video, dict) or not video.get("file"):
+            continue
+        videos.append(video)
+        seen_files.add(video["file"])
+
+    for stream in index_data.get("streams", []) or []:
+        if not isinstance(stream, dict):
+            continue
+        stream_name = stream.get("name", "")
+        for video in stream.get("videos", []) or []:
+            if not isinstance(video, dict) or not video.get("file"):
+                continue
+            if video["file"] in seen_files:
+                continue
+            item = dict(video)
+            if stream_name and "stream" not in item:
+                item["stream"] = stream_name
+            videos.append(item)
+            seen_files.add(item["file"])
+
+    return videos
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--directory", help="Session directory", required=True)
@@ -441,7 +473,7 @@ def main():
 
     with open(index_path, 'r') as f: index_data = json.load(f)
     
-    videos = index_data.get("videos", [])
+    videos = index_videos(index_data)
     rosbag_name = index_data.get("rosbags", index_data.get("rosbag", {}).get("name") if isinstance(index_data.get("rosbag"), dict) else None)
 
     base_extracted_dir = os.path.join(args.directory, "extracted")
