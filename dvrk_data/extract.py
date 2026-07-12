@@ -18,22 +18,10 @@ from .common import get_current_timestamp_iso8601
 
 
 def parse_stage_timestamp(value):
-    """
-    Parses a stage timestamp from a JSON value.
-    Handles legacy integer format and new object format.
-    
-    Returns:
-        tuple: (cpu_ts, frame). Either or both can be None.
-    """
-    if value is None:
+    """Return the current video_tags stage timestamp object fields."""
+    if not isinstance(value, dict):
         return None, None
-    if isinstance(value, dict):
-        # Use frame_relative which is the index into the frames array
-        return value.get("cpu_ts"), value.get("frame_relative")
-    try:
-        return int(value), None
-    except (ValueError, TypeError):
-        return None, None
+    return value.get("cpu_ts"), value.get("frame_relative")
 
 def flatten_dict(d, parent_key='', sep='.'):
     items = []
@@ -351,28 +339,22 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
 
     if not video_path: return
 
-    # acquisition_time = cpu_ts - latency
-    latency_s = data.get("estimated_latency", latency_s)
-    if "estimated_latency_ms" in data and "estimated_latency" not in data:
-        latency_s = data.get("estimated_latency_ms", 0.0) / 1000.0
-    latency_ns = int(latency_s * 1e9)
+    latency_ns = int(data.get("estimated_latency_ms", 0.0) * 1e6)
 
-    timestamps = data.get("timestamps_ns", data.get("timestamps", data.get("timestamps_ms")))
-    is_ns = "timestamps_ns" in data
-    is_ms = "timestamps_ms" in data and not is_ns
-    gst_timestamps = None  # GStreamer timestamps for video frame mapping
+    frames = data.get("frames")
+    if not isinstance(frames, list) or not frames:
+        print(f"CRITICAL: Sidecar {json_path} is missing current frames[] data")
+        return
 
-    if not timestamps and "frames" in data:
-        frames = data["frames"]
-        if frames and isinstance(frames[0], dict):
-            timestamps = [
-                f.get("cpu_ts", f.get("cpu_ns", f.get("gst_ts", f.get("gst_ns", 0))))
-                for f in frames
-            ]
-            gst_timestamps = [f.get("gst_ts", f.get("gst_ns", 0)) for f in frames]
-            is_ns = True; is_ms = False
+    missing = [i for i, f in enumerate(frames) if "cpu_ns" not in f or "gst_ns" not in f]
+    if missing:
+        print(f"CRITICAL: Sidecar {json_path} has frames without cpu_ns/gst_ns")
+        return
 
-    if not timestamps: return
+    timestamps = [f["cpu_ns"] for f in frames]
+    gst_timestamps = [f["gst_ns"] for f in frames]
+    is_ns = True
+    is_ms = False
 
     indices = []
     for i, ts in enumerate(timestamps):
@@ -382,13 +364,8 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
     
     if not indices: return
     
-    # Calculate video frame indices from gst_ts if available
-    # gst_ts is in nanoseconds, convert to frame index using fps
     video_fps = data.get("fps") or 30.0
-    if gst_timestamps:
-        video_indices = [round(gst_timestamps[i] * video_fps / 1e9) for i in indices]
-    else:
-        video_indices = indices  # Fallback: assume 1:1 mapping
+    video_indices = [round(gst_timestamps[i] * video_fps / 1e9) for i in indices]
     
     start_idx = video_indices[0]
     end_idx = video_indices[-1]
@@ -400,7 +377,7 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
     
     for fmt in formats:
         if fmt == 'mp4':
-            fps = data.get("fps", 30.0)
+            fps = data.get("fps") or 30.0
             out_all_name = f"{video_basename}.mp4"
             print(f"Extracting video segment: {out_all_name}")
             extract_video_range(video_path, os.path.join(output_dir, out_all_name), start_idx, end_idx, fps, video_indices, side_by_side)
@@ -419,29 +396,27 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
                 process_video_chunk(tasks[0])
 
 def index_videos(index_data):
+    if index_data.get("type") != "dvrk_data:index@1.0.0":
+        print(f"CRITICAL: Unsupported index type: {index_data.get('type')}")
+        return []
+
+    streams = index_data.get("streams")
+    if not isinstance(streams, list):
+        print("CRITICAL: Current index format requires streams[]")
+        return []
+
     videos = []
-    seen_files = set()
-
-    for video in index_data.get("videos", []) or []:
-        if not isinstance(video, dict) or not video.get("file"):
-            continue
-        videos.append(video)
-        seen_files.add(video["file"])
-
-    for stream in index_data.get("streams", []) or []:
+    for stream in streams:
         if not isinstance(stream, dict):
             continue
         stream_name = stream.get("name", "")
         for video in stream.get("videos", []) or []:
             if not isinstance(video, dict) or not video.get("file"):
                 continue
-            if video["file"] in seen_files:
-                continue
             item = dict(video)
-            if stream_name and "stream" not in item:
+            if stream_name:
                 item["stream"] = stream_name
             videos.append(item)
-            seen_files.add(item["file"])
 
     return videos
 
@@ -474,7 +449,7 @@ def main():
     with open(index_path, 'r') as f: index_data = json.load(f)
     
     videos = index_videos(index_data)
-    rosbag_name = index_data.get("rosbags", index_data.get("rosbag", {}).get("name") if isinstance(index_data.get("rosbag"), dict) else None)
+    rosbag_name = index_data.get("rosbags")
 
     base_extracted_dir = os.path.join(args.directory, "extracted")
     os.makedirs(base_extracted_dir, exist_ok=True)
@@ -511,13 +486,9 @@ def main():
                     if os.path.exists(v_json):
                         with open(v_json, 'r') as vf:
                             v_data = json.load(vf)
-                            source_v_latency = v_data.get("estimated_latency", 0.0)
-                            source_v_ts = v_data.get("timestamps_ns", v_data.get("timestamps", []))
-                            # Also handle "frames" format
-                            if not source_v_ts and "frames" in v_data:
-                                frames = v_data["frames"]
-                                if frames and isinstance(frames[0], dict):
-                                    source_v_ts = [f.get("cpu_ts", f.get("gst_ts", 0)) for f in frames]
+                            source_v_latency = v_data.get("estimated_latency_ms", 0.0) / 1000.0
+                            frames = v_data.get("frames", [])
+                            source_v_ts = [f["cpu_ns"] for f in frames if "cpu_ns" in f]
                     break
 
         stage_counts = {}
@@ -541,17 +512,9 @@ def main():
                              final_val = int(final_val * 1e9)
                         return final_val - int(source_v_latency * 1e9)
                 
-                if ts:
-                    try: ts_val = float(ts)
-                    except: return None
-                    
-                    # Assume ts is in seconds if it's a float or reasonably small integer
-                    # 1e12 is approx year 2001 in seconds and early 1970 in ns
-                    if ts_val < 1e12:
-                        return int(ts_val * 1e9) - int(source_v_latency * 1e9)
-                    else:
-                        return int(ts_val) - int(source_v_latency * 1e9)
-                    
+                if ts is not None:
+                    return int(ts) - int(source_v_latency * 1e9)
+
                 return None
 
             start_val = resolve_acq(ts_s, f_s)
