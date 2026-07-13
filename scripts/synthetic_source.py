@@ -20,7 +20,7 @@ except ImportError:
     print("Error: python3-cairo is required. Install it with: sudo apt install python3-cairo")
     sys.exit(1)
 
-import dvrk_gst_socket as dvrk_gst
+from dvrk_data import dvrk_gst_socket as dvrk_gst
 
 class SyntheticSource(Node):
     def __init__(self, left_socket, right_socket, correlation_topic, width, height, fps):

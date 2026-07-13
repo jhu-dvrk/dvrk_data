@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+gscam_socket — launch gscam_node for a dvrk_gst abstract Unix socket.
+
+Usage
+-----
+  gscam_socket                          # list available @dvrk_gst sockets
+  gscam_socket <socket>                 # launch gscam for the given socket
+
+Socket forms accepted
+---------------------
+  left                                  # short name → @dvrk_gst:stereo_source:left
+  stereo_alignment:stereo               # role:name   → @dvrk_gst:stereo_alignment:stereo
+  @dvrk_gst:stereo_display:overlay      # fully-qualified (used as-is)
+
+Optional arguments (passed through to gscam.launch.py)
+-------------------------------------------------------
+  --namespace  <ns>     Override ROS namespace  (default: <role>/<name>)
+  --frame-id   <fid>    Override TF frame_id    (default: <role>_<name>_frame)
+  --camera-name <cn>    Override camera_name    (default: <role>_<name>)
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+
+# ---------------------------------------------------------------------------
+# Socket helpers (inline copy of dvrk_data.dvrk_gst_socket — avoids requiring
+# the workspace to be sourced just for the discovery/resolve step).
+# ---------------------------------------------------------------------------
+
+_PREFIX = "@dvrk_gst:"
+_DEFAULT_ROLE = "stereo_source"
+
+
+def _list_sockets():
+    """Return sorted, deduplicated list of active @dvrk_gst abstract sockets."""
+    result = []
+    try:
+        with open("/proc/net/unix") as f:
+            next(f)  # skip header
+            for line in f:
+                parts = line.rstrip().rsplit(None, 1)
+                if len(parts) >= 2 and parts[-1].startswith(_PREFIX):
+                    result.append(parts[-1])
+    except OSError:
+        pass
+    return sorted(set(result))
+
+
+def _resolve(socket_field: str, default_role: str = _DEFAULT_ROLE) -> str:
+    """Resolve any accepted socket form to a fully-qualified name."""
+    if not socket_field:
+        return ""
+    if socket_field.startswith(_PREFIX):
+        return socket_field
+    if ":" in socket_field:
+        return _PREFIX + socket_field
+    return f"{_PREFIX}{default_role}:{socket_field}"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="gscam_socket",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "socket",
+        nargs="?",
+        default=None,
+        metavar="SOCKET",
+        help=(
+            "Socket to read from. Accepts short name (e.g. 'left'), "
+            "role:name (e.g. 'stereo_alignment:stereo'), or fully-qualified "
+            "name (e.g. '@dvrk_gst:stereo_source:left'). "
+            f"Short names use the default role '{_DEFAULT_ROLE}'."
+        ),
+    )
+    parser.add_argument(
+        "--namespace",
+        default="",
+        metavar="NS",
+        help="Override the ROS namespace for the gscam node.",
+    )
+    parser.add_argument(
+        "--frame-id",
+        default="",
+        dest="frame_id",
+        metavar="FID",
+        help="Override the TF frame_id stamped on published images.",
+    )
+    parser.add_argument(
+        "--camera-name",
+        default="",
+        dest="camera_name",
+        metavar="CN",
+        help="Override the camera_name stored in CameraInfo.",
+    )
+
+    args = parser.parse_args()
+
+    # ── No socket given: list and exit ──────────────────────────────────────
+    if args.socket is None:
+        sockets = _list_sockets()
+        if not sockets:
+            print("No @dvrk_gst abstract sockets are currently active.", file=sys.stderr)
+            print(
+                "\nMake sure stereo_source, stereo_alignment, or stereo_display "
+                "is running.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        print("Available @dvrk_gst sockets:")
+        for i, s in enumerate(sockets, 1):
+            print(f"  [{i}] {s}")
+        print(f"\nUsage: gscam_socket <socket>")
+        print(f"Example: gscam_socket {sockets[0]}")
+        sys.exit(0)
+
+    # ── Resolve to fully-qualified name ─────────────────────────────────────
+    fqn = _resolve(args.socket)
+
+    # ── Verify the socket is live ───────────────────────────────────────────
+    active = _list_sockets()
+    if fqn not in active:
+        print(f"error: socket not found: {fqn}", file=sys.stderr)
+        if active:
+            print("Available @dvrk_gst sockets:", file=sys.stderr)
+            for s in active:
+                print(f"  {s}", file=sys.stderr)
+        else:
+            print("No @dvrk_gst sockets are currently active.", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Build ros2 launch command ───────────────────────────────────────────
+    cmd = [
+        "ros2", "launch",
+        "dvrk_data", "gscam.launch.py",
+        f"socket:={fqn}",
+    ]
+    if args.namespace:
+        cmd.append(f"namespace:={args.namespace}")
+    if args.frame_id:
+        cmd.append(f"frame_id:={args.frame_id}")
+    if args.camera_name:
+        cmd.append(f"camera_name:={args.camera_name}")
+
+    # Print a summary so the user knows what is launching
+    print(f"Launching gscam for socket: {fqn}")
+    print(f"  command: {' '.join(cmd)}")
+    print()
+
+    # ── Hand off to ros2 launch (stays in the foreground) ──────────────────
+    try:
+        os.execvp("ros2", cmd)  # replaces this process — Ctrl-C works naturally
+    except FileNotFoundError:
+        print("error: 'ros2' command not found. Source your ROS 2 workspace first.", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

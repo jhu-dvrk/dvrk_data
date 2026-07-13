@@ -13,7 +13,7 @@ except ImportError:
     print("Error: opencv-python and numpy are required. Install them with: pip install opencv-python numpy or sudo apt install python3-opencv python3-numpy")
     sys.exit(1)
 
-import dvrk_gst_socket as dvrk_gst
+from dvrk_data import dvrk_gst_socket as dvrk_gst
 
 def main():
     left_socket  = dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "left_ar")

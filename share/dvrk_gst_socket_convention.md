@@ -181,7 +181,7 @@ if (!dvrk_gst::check_socket("@dvrk_gst:stereo_alignment:stereo")) {
 ### Python API
 
 ```python
-import dvrk_gst_socket as dvrk_gst
+import dvrk_data.dvrk_gst_socket as dvrk_gst
 
 # List and print:
 dvrk_gst.print_sockets()
@@ -200,4 +200,4 @@ if not dvrk_gst.check_socket("@dvrk_gst:stereo_alignment:stereo"):
 | Language | File                                                          |
 |----------|---------------------------------------------------------------|
 | C++      | `dvrk_data/include/dvrk_data/dvrk_gst_socket.hpp`            |
-| Python   | `dvrk_data/scripts/dvrk_gst_socket.py`                       |
+| Python   | `dvrk_data/dvrk_data/dvrk_gst_socket.py`                     |

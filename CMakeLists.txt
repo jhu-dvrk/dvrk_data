@@ -190,6 +190,7 @@ install(PROGRAMS
   scripts/synthetic_source.py
   scripts/gstreamer_ar.py
   scripts/opencv_ar.py
+  scripts/gscam_socket
   scripts/smoke_test_stack
   scripts/extract
   scripts/encord_to_tags
