@@ -13,9 +13,11 @@ except ImportError:
     print("Error: opencv-python and numpy are required. Install them with: pip install opencv-python numpy or sudo apt install python3-opencv python3-numpy")
     sys.exit(1)
 
+import dvrk_gst_socket as dvrk_gst
+
 def main():
-    left_socket = "/tmp/dvrk_display_left_ar.sock"
-    right_socket = "/tmp/dvrk_display_right_ar.sock"
+    left_socket  = dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "left_ar")
+    right_socket = dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "right_ar")
 
     parser = argparse.ArgumentParser(description="OpenCV-based 3D AR Overlay source for dVRK console")
     parser.add_argument("-w", "--width", type=int, default=640, help="Width of frame (default: 640)")
@@ -26,14 +28,7 @@ def main():
     height = args.height
     fps = 30
 
-    # Clean up existing socket files to avoid bind errors
-    for socket_path in [left_socket, right_socket]:
-        if os.path.exists(socket_path):
-            print(f"Removing existing socket: {socket_path}")
-            try:
-                os.unlink(socket_path)
-            except OSError as e:
-                print(f"Error removing {socket_path}: {e}")
+    # Abstract sockets are cleaned up by the kernel — no filesystem removal needed.
 
     # GStreamer pipelines for cv2.VideoWriter (BGR 3-channels)
     # We specify format=BGR on appsrc, then convert to BGRx before unixfdsink.
@@ -41,12 +36,12 @@ def main():
     gst_pipeline_l = (
         f"appsrc format=time ! video/x-raw,format=BGR ! videoconvert ! video/x-raw,format=BGRx ! "
         f"queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-        f"unixfdsink socket-path={left_socket} sync=false async=false"
+        f"{dvrk_gst.build_sink(left_socket)}"
     )
     gst_pipeline_r = (
         f"appsrc format=time ! video/x-raw,format=BGR ! videoconvert ! video/x-raw,format=BGRx ! "
         f"queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-        f"unixfdsink socket-path={right_socket} sync=false async=false"
+        f"{dvrk_gst.build_sink(right_socket)}"
     )
 
     print("Initializing OpenCV GStreamer VideoWriters...")
@@ -112,13 +107,7 @@ def main():
     finally:
         writer_l.release()
         writer_r.release()
-        for socket_path in [left_socket, right_socket]:
-            if os.path.exists(socket_path):
-                try:
-                    os.unlink(socket_path)
-                except OSError:
-                    pass
-        print("Sockets cleaned up.")
+        # Abstract sockets are cleaned up by the kernel — no filesystem removal needed.
 
 if __name__ == '__main__':
     main()

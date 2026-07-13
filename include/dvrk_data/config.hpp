@@ -9,7 +9,8 @@
 namespace sv {
 
 struct SourceConfig {
-    std::string source;
+    std::string source;  // raw GStreamer pipeline string
+    std::string socket;  // abstract socket name (@dvrk_gst:role:name); overrides source
 };
 
 struct ColorAdjustment {
@@ -19,15 +20,17 @@ struct ColorAdjustment {
     double hue = 0.0;
 };
 
+// Single-field socket config.  The "socket" value may be:
+//   "name"                    short name, expanded with the caller's default role
+//   "role:name"               expanded to @dvrk_gst:role:name
+//   "@dvrk_gst:role:name"     used as-is
+// Use dvrk_gst::resolve(socket, default_role) to obtain the full abstract name.
 struct UnixfdSinkConfig {
-    std::string stream;
-    std::string name;
-    std::string socket_path;
+    std::string socket;
 };
 
 struct UnixfdSourceConfig {
-    std::string name;         // "left" or "right" — used for matching and socket path suffix
-    std::string socket_path;  // optional, explicit absolute path
+    std::string socket;
 };
 
 struct StereoExtraStream {
@@ -44,8 +47,8 @@ struct ExtraStreamsConfig {
 
 struct ARConfig {
     bool enabled = false;
-    std::string left_socket;
-    std::string right_socket;
+    std::string left;   // abstract socket for left AR overlay (@dvrk_gst:stereo_source:left_ar)
+    std::string right;  // abstract socket for right AR overlay (@dvrk_gst:stereo_source:right_ar)
     bool use_color_key = false;
     int color_key_r = 0;
     int color_key_g = 0;

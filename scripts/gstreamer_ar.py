@@ -16,6 +16,8 @@ except ImportError:
     print("Error: python3-cairo is required. Install it with: sudo apt install python3-cairo")
     sys.exit(1)
 
+import dvrk_gst_socket as dvrk_gst
+
 class SimpleAR:
     def __init__(self, left_socket, right_socket, width, height, fps=30):
         self.width = width
@@ -26,14 +28,7 @@ class SimpleAR:
 
         Gst.init(None)
 
-        # Remove existing socket files to avoid bind errors
-        for socket_path in [left_socket, right_socket]:
-            if os.path.exists(socket_path):
-                print(f"Removing existing socket: {socket_path}")
-                try:
-                    os.unlink(socket_path)
-                except OSError as e:
-                    print(f"Error removing {socket_path}: {e}")
+        # Abstract sockets are cleaned up by the kernel — no filesystem removal needed.
 
         # Pipeline: videotestsrc (transparent) -> cairooverlay -> unixfdsink
         pipeline_str = (
@@ -41,13 +36,13 @@ class SimpleAR:
             f"video/x-raw,format=BGRA,width={width},height={height},framerate={fps}/1 ! "
             f"cairooverlay name=overlay_l ! "
             f"queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-            f"unixfdsink socket-path={left_socket} sync=true async=false "
-            
+            f"{dvrk_gst.build_sink(left_socket, sync=True)} "
+
             f"videotestsrc pattern=solid-color foreground-color=0 background-color=0 is-live=true ! "
             f"video/x-raw,format=BGRA,width={width},height={height},framerate={fps}/1 ! "
             f"cairooverlay name=overlay_r ! "
             f"queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-            f"unixfdsink socket-path={right_socket} sync=true async=false"
+            f"{dvrk_gst.build_sink(right_socket, sync=True)}"
         )
 
         print("Initializing GStreamer pipeline...")
@@ -133,17 +128,11 @@ class SimpleAR:
 
     def stop(self):
         self.pipeline.set_state(Gst.State.NULL)
-        for socket_path in [self.left_socket, self.right_socket]:
-            if os.path.exists(socket_path):
-                try:
-                    os.unlink(socket_path)
-                except OSError:
-                    pass
-        print("Sockets cleaned up.")
+        # Abstract sockets are cleaned up by the kernel — no filesystem removal needed.
 
 def main():
-    left_socket = "/tmp/dvrk_display_left_ar.sock"
-    right_socket = "/tmp/dvrk_display_right_ar.sock"
+    left_socket  = dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "left_ar")
+    right_socket = dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "right_ar")
 
     parser = argparse.ArgumentParser(description="Cairo-based 3D AR Overlay source for dVRK console")
     parser.add_argument("-w", "--width", type=int, default=640, help="Width of frame (default: 640)")

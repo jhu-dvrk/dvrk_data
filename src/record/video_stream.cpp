@@ -2,14 +2,13 @@
 #include "context.hpp"
 #include "gst_helpers.hpp"
 #include "ros_node.hpp"
+#include <dvrk_data/dvrk_gst_socket.hpp>
 #include <iostream>
 #include <fstream>
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
 #include <gst/video/video.h>
-#include <pwd.h>
-#include <unistd.h>
 
 extern int app_max_threads;
 
@@ -120,22 +119,17 @@ bool VideoStream::create(AppData* ad, const dc::VideoConfig* v) {
 
     std::string source_stream = v->stream;
 
-    if (v->has_unixfd_socket_path) {
-        std::string socket_path = v->unixfd_socket_path;
-        if (socket_path.empty()) {
-            // Generate default socket path using username and stream name
-            const char *username = getenv("USER");
-            if (!username) {
-                struct passwd *pw = getpwuid(getuid());
-                username = pw ? pw->pw_name : "unknown";
-            }
-            socket_path = "/tmp/" + v->name + "_" + std::string(username) + ".sock";
+    if (!v->socket.empty()) {
+        const std::string abstract_name = dvrk_gst::resolve(v->socket, "");
+        if (!dvrk_gst::check_socket(abstract_name)) {
+            std::cerr << "Warning: socket '" << abstract_name
+                      << "' not yet active; pipeline will retry on connect." << std::endl;
         }
         source_stream =
-            "unixfdsrc socket-path=" + socket_path +
-            " do-timestamp=true ! videoconvert ! video/x-raw,format=NV12 ! "
-            "queue name=__remote_offset_q__ max-size-buffers=2 "
-            "max-size-time=0 max-size-bytes=0 leaky=downstream";
+            dvrk_gst::build_src(abstract_name) +
+            " ! videoconvert ! video/x-raw,format=NV12"
+            " ! queue name=__remote_offset_q__ max-size-buffers=2"
+            " max-size-time=0 max-size-bytes=0 leaky=downstream";
     }
 
     if (source_stream.empty()) {
@@ -154,7 +148,7 @@ bool VideoStream::create(AppData* ad, const dc::VideoConfig* v) {
     }
 
     // Warning for two sources but side_by_side setting missing
-    if (!v->has_unixfd_socket_path && this->side_by_side == "undefined") {
+    if (v->socket.empty() && this->side_by_side == "undefined") {
         size_t pos = 0;
         int sources = 0;
         while ((pos = source_stream.find("src", pos)) != std::string::npos) {

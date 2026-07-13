@@ -81,21 +81,18 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
 
     if (root.isMember("unixfdsinks") && root["unixfdsinks"].isArray()) {
         for (const auto& item : root["unixfdsinks"]) {
-            if (!item.isMember("stream")) continue;
+            if (!item.isMember("socket")) continue;
             UnixfdSinkConfig sc;
-            sc.stream      = item["stream"].asString();
-            sc.name        = item.get("name", "").asString();
-            sc.socket_path = item.get("socket_path", "").asString();
+            sc.socket = item["socket"].asString();
             cfg.unixfd_sinks.push_back(sc);
         }
     }
 
     if (root.isMember("unixfdsources") && root["unixfdsources"].isArray()) {
         for (const auto& item : root["unixfdsources"]) {
-            if (!item.isMember("name")) continue;
+            if (!item.isMember("socket")) continue;
             UnixfdSourceConfig sc;
-            sc.name        = item["name"].asString();
-            sc.socket_path = item.get("socket_path", "").asString();
+            sc.socket = item["socket"].asString();
             cfg.unixfd_sources.push_back(sc);
         }
     }
@@ -106,7 +103,9 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
 
     if (root.isMember("stereo") && root["stereo"].isObject()) {
         const Json::Value& stereo = root["stereo"];
-        if (stereo.isMember("stream") && stereo["stream"].isString()) {
+        if (stereo.isMember("socket") && stereo["socket"].isString()) {
+            cfg.stereo.socket = stereo["socket"].asString();
+        } else if (stereo.isMember("stream") && stereo["stream"].isString()) {
             cfg.stereo.source = stereo["stream"].asString();
         }
 
@@ -211,11 +210,11 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     if (root.isMember("ar") && root["ar"].isObject()) {
         const Json::Value& ar = root["ar"];
         cfg.ar.enabled = ar.get("enabled", true).asBool();
-        if (ar.isMember("left_socket") && ar["left_socket"].isString()) {
-            cfg.ar.left_socket = ar["left_socket"].asString();
+        if (ar.isMember("left") && ar["left"].isString()) {
+            cfg.ar.left = ar["left"].asString();
         }
-        if (ar.isMember("right_socket") && ar["right_socket"].isString()) {
-            cfg.ar.right_socket = ar["right_socket"].asString();
+        if (ar.isMember("right") && ar["right"].isString()) {
+            cfg.ar.right = ar["right"].asString();
         }
         if (ar.isMember("color_key") && ar["color_key"].isArray() && ar["color_key"].size() == 3) {
             cfg.ar.use_color_key = true;

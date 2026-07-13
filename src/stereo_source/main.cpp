@@ -8,6 +8,7 @@
 
 #include <dvrk_data/config.hpp>
 #include <dvrk_data/cpu_timestamp_meta.hpp>
+#include <dvrk_data/dvrk_gst_socket.hpp>
 #include <dvrk_data/stereo_common.hpp>
 
 namespace {
@@ -100,7 +101,7 @@ std::string build_branch(const std::string &source,
                          const std::string &queue_name,
                          const std::string &tee_name,
                          const std::vector<sv::UnixfdSinkConfig> &sinks,
-                         const sv::AppConfig &cfg) {
+                         const std::string &role) {
   std::string branch =
       source + " ! queue name=" + queue_name +
       " max-size-buffers=3 max-size-time=0 max-size-bytes=0 leaky=downstream";
@@ -116,14 +117,12 @@ std::string build_branch(const std::string &source,
                 "max-size-bytes=0 leaky=downstream";
     }
 
-    const std::string socket_path =
-        dc_stereo::resolve_unixfd_socket_path(cfg.name, sinks[i]);
+    const std::string abstract_name = dvrk_gst::resolve(sinks[i].socket, role);
     branch += " ! videoconvert ! video/x-raw,format=I420"
               " ! queue name=__" +
               stream_name + "_unixfd_q" + std::to_string(i) +
               "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-              "leaky=downstream ! unixfdsink socket-path=" +
-              socket_path + " socket-type=abstract sync=false async=false";
+              "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
   }
 
   return branch;
@@ -134,10 +133,10 @@ std::string build_pipeline_string(
     const std::vector<sv::UnixfdSinkConfig> &left_sinks,
     const std::vector<sv::UnixfdSinkConfig> &right_sinks) {
   return build_branch(cfg.left.source, "left", "__left_src_q__", "__left_out__",
-                      left_sinks, cfg) +
+                      left_sinks, dvrk_gst::ROLE_STEREO_SOURCE) +
          " " +
          build_branch(cfg.right.source, "right", "__right_src_q__",
-                      "__right_out__", right_sinks, cfg);
+                      "__right_out__", right_sinks, dvrk_gst::ROLE_STEREO_SOURCE);
 }
 
 }  // namespace
@@ -192,21 +191,21 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  auto left_sinks = dc_stereo::collect_unixfd_sinks(cfg, "left");
-  auto right_sinks = dc_stereo::collect_unixfd_sinks(cfg, "right");
+  auto left_sinks = dc_stereo::collect_unixfd_sinks(cfg, dvrk_gst::ROLE_STEREO_SOURCE, "left");
+  auto right_sinks = dc_stereo::collect_unixfd_sinks(cfg, dvrk_gst::ROLE_STEREO_SOURCE, "right");
   dc_stereo::ensure_sink(left_sinks, "left");
   dc_stereo::ensure_sink(right_sinks, "right");
 
-  dc_stereo::remove_stale_sockets(cfg.name, left_sinks, node->get_logger());
-  dc_stereo::remove_stale_sockets(cfg.name, right_sinks, node->get_logger());
+  dc_stereo::remove_stale_sockets(cfg.name, left_sinks, dvrk_gst::ROLE_STEREO_SOURCE, node->get_logger());
+  dc_stereo::remove_stale_sockets(cfg.name, right_sinks, dvrk_gst::ROLE_STEREO_SOURCE, node->get_logger());
 
   for (const auto &sink : left_sinks) {
     RCLCPP_INFO(node->get_logger(), "left unixfd sink: %s",
-                dc_stereo::resolve_unixfd_socket_path(cfg.name, sink).c_str());
+                dvrk_gst::resolve(sink.socket, dvrk_gst::ROLE_STEREO_SOURCE).c_str());
   }
   for (const auto &sink : right_sinks) {
     RCLCPP_INFO(node->get_logger(), "right unixfd sink: %s",
-                dc_stereo::resolve_unixfd_socket_path(cfg.name, sink).c_str());
+                dvrk_gst::resolve(sink.socket, dvrk_gst::ROLE_STEREO_SOURCE).c_str());
   }
 
   dc_stereo::warn_if_interlaced_stream(cfg.left.source, node->get_logger(),

@@ -3,7 +3,7 @@
   "videos": [
     {
       "name": "dvrk_test_synthetic",
-      "unixfd_socket_path": "",
+      "socket": "stereo_alignment:stereo",
       "record": true,
       "timestamp_overlay": false,
       "encoding": {

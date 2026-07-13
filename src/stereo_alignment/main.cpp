@@ -13,6 +13,7 @@
 
 #include <dvrk_data/config.hpp>
 #include <dvrk_data/cpu_timestamp_meta.hpp>
+#include <dvrk_data/dvrk_gst_socket.hpp>
 #include <dvrk_data/stereo_common.hpp>
 
 namespace {
@@ -362,19 +363,17 @@ std::string build_pipeline_string(
   if (stereo_sinks.size() > 1) {
     outputs += " ! tee name=__stereo_out__ ";
     for (std::size_t i = 0; i < stereo_sinks.size(); ++i) {
-      const std::string socket_path =
-          dc_stereo::resolve_unixfd_socket_path(cfg.name, stereo_sinks[i]);
+      const std::string abstract_name =
+          dvrk_gst::resolve(stereo_sinks[i].socket, dvrk_gst::ROLE_STEREO_ALIGNMENT);
       outputs += " __stereo_out__. ! queue name=__stereo_unixfd_ts_q" + std::to_string(i) +
                  "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-                 "leaky=downstream ! unixfdsink socket-path=" +
-                 socket_path + " socket-type=abstract sync=false async=false";
+                 "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
     }
   } else if (stereo_sinks.size() == 1) {
-    const std::string socket_path =
-        dc_stereo::resolve_unixfd_socket_path(cfg.name, stereo_sinks[0]);
+    const std::string abstract_name =
+        dvrk_gst::resolve(stereo_sinks[0].socket, dvrk_gst::ROLE_STEREO_ALIGNMENT);
     outputs += " ! queue name=__stereo_unixfd_ts_q0__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-               "leaky=downstream ! unixfdsink socket-path=" +
-               socket_path + " socket-type=abstract sync=false async=false";
+               "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
   }
 
   return left_chain + " " + right_chain + " " + output_chain + " " + outputs;
@@ -425,25 +424,25 @@ int main(int argc, char *argv[]) {
   }
 
   if (cfg.left.source.empty()) {
-    auto srcs = dc_stereo::collect_unixfd_sources(cfg, "left");
+    auto srcs = dc_stereo::collect_unixfd_sources(cfg, dvrk_gst::ROLE_STEREO_SOURCE, "left");
     if (!srcs.empty()) {
-      const std::string path =
-          dc_stereo::resolve_unixfd_source_path(cfg.name, srcs[0]);
+      const std::string abstract_name =
+          dvrk_gst::resolve(srcs[0].socket, dvrk_gst::ROLE_STEREO_SOURCE);
       cfg.left.source =
-          dc_stereo::build_unixfdsrc_string(path, cfg.original_width,
+          dc_stereo::build_unixfdsrc_string(abstract_name, cfg.original_width,
                                             cfg.original_height);
-      RCLCPP_INFO(node->get_logger(), "left unixfd source: %s", path.c_str());
+      RCLCPP_INFO(node->get_logger(), "left unixfd source: %s", abstract_name.c_str());
     }
   }
   if (cfg.right.source.empty()) {
-    auto srcs = dc_stereo::collect_unixfd_sources(cfg, "right");
+    auto srcs = dc_stereo::collect_unixfd_sources(cfg, dvrk_gst::ROLE_STEREO_SOURCE, "right");
     if (!srcs.empty()) {
-      const std::string path =
-          dc_stereo::resolve_unixfd_source_path(cfg.name, srcs[0]);
+      const std::string abstract_name =
+          dvrk_gst::resolve(srcs[0].socket, dvrk_gst::ROLE_STEREO_SOURCE);
       cfg.right.source =
-          dc_stereo::build_unixfdsrc_string(path, cfg.original_width,
+          dc_stereo::build_unixfdsrc_string(abstract_name, cfg.original_width,
                                             cfg.original_height);
-      RCLCPP_INFO(node->get_logger(), "right unixfd source: %s", path.c_str());
+      RCLCPP_INFO(node->get_logger(), "right unixfd source: %s", abstract_name.c_str());
     }
   }
 
@@ -466,13 +465,13 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  auto stereo_sinks = dc_stereo::collect_unixfd_sinks(cfg, "stereo");
+  auto stereo_sinks = dc_stereo::collect_unixfd_sinks(cfg, dvrk_gst::ROLE_STEREO_ALIGNMENT, "stereo");
   dc_stereo::ensure_sink(stereo_sinks, "stereo");
-  dc_stereo::remove_stale_sockets(cfg.name, stereo_sinks, node->get_logger());
+  dc_stereo::remove_stale_sockets(cfg.name, stereo_sinks, dvrk_gst::ROLE_STEREO_ALIGNMENT, node->get_logger());
 
   for (const auto &sink : stereo_sinks) {
     RCLCPP_INFO(node->get_logger(), "stereo unixfd sink: %s",
-                dc_stereo::resolve_unixfd_socket_path(cfg.name, sink).c_str());
+                dvrk_gst::resolve(sink.socket, dvrk_gst::ROLE_STEREO_ALIGNMENT).c_str());
   }
 
   const std::string pipeline_string =

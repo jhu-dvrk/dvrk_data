@@ -7,12 +7,11 @@ import select
 from pathlib import Path
 import sys
 import termios
-import threading
-import time
 import tty
 
 import cv2
 import numpy as np
+import dvrk_gst_socket as dvrk_gst
 
 KEY_UP = "UP"
 KEY_DOWN = "DOWN"
@@ -24,10 +23,7 @@ KEY_QUIT = "q"
 KEY_FULLSCREEN = "f"
 KEY_RESET_SHIFT = "r"
 KEY_COLOR_CALIBRATE = "c"
-KEY_LINE_LEFT = "["
-KEY_LINE_RIGHT = "]"
 KEY_LINE_TOGGLE = "g"
-KEY_PSM_OSCILLATE = "v"
 KEY_STRETCH_OUT = "o"
 KEY_STRETCH_IN = "p"
 
@@ -73,14 +69,8 @@ class TerminalInput:
                 key = KEY_RESET_SHIFT
             elif ch in ("c", "C"):
                 key = KEY_COLOR_CALIBRATE
-            elif ch == "[":
-                key = KEY_LINE_LEFT
-            elif ch == "]":
-                key = KEY_LINE_RIGHT
             elif ch in ("g", "G"):
                 key = KEY_LINE_TOGGLE
-            elif ch in ("v", "V"):
-                key = KEY_PSM_OSCILLATE
             elif ch in ("o", "O"):
                 key = KEY_STRETCH_OUT
             elif ch in ("p", "P"):
@@ -243,31 +233,10 @@ def open_capture(source_label: str, source_snippet: str):
     return cap
 
 
-def resolve_unixfd_source_path(app_name: str, source_cfg: dict) -> str:
-    socket_path = source_cfg.get("socket_path", "")
-    if socket_path:
-        return socket_path
-
-    # Get username
-    import getpass
-    username = os.environ.get("USER")
-    if not username:
-        try:
-            import pwd
-            username = pwd.getpwuid(os.getuid()).pw_name
-        except Exception:
-            username = getpass.getuser() or "unknown"
-
-    return f"/tmp/{app_name}_{source_cfg.get('name')}_{username}.sock"
-
-
 def ensure_config_fields(config):
     # Keep the original type if it exists, otherwise use standard dvrk_data:stereo_alignment@1.0.0
     config.setdefault("type", "dvrk_data:stereo_alignment@1.0.0")
-    config.setdefault("name", "dvrk_display")
-    config.setdefault("dvrk_console_namespace", "console")
-    config.setdefault("display_horizontal_offset_px", 0)
-    config.setdefault("sinks", ["glimage"])
+    config.setdefault("name", "stereo_alignment")
     config.setdefault("preserve_size", True)
     cam = config.setdefault("camera", {})
     sz = cam.setdefault("size", {})
@@ -289,16 +258,13 @@ def load_or_create(path: Path):
 
     return {
         "type": "dvrk_data:stereo_alignment@1.0.0",
-        "name": "dvrk_display",
-        "dvrk_console_namespace": "console",
+        "name": "stereo_alignment",
+        "preserve_size": True,
         "camera": {
             "size": {"width": 0, "height": 0},
             "left": {"stream": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
             "right": {"stream": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
         },
-        "display_horizontal_offset_px": 0,
-        "sinks": ["glimage"],
-        "preserve_size": True,
     }
 
 
@@ -313,7 +279,6 @@ def parse_args():
     parser.add_argument("-l", "--left", help="Left source GStreamer snippet")
     parser.add_argument("-r", "--right", help="Right source GStreamer snippet")
     parser.add_argument("-s", "--split", action="store_true", help="Split stereo view in two windows")
-    parser.add_argument("-p", "--psm", help="PSM name to oscillate, e.g. PSM1")
     return parser.parse_args()
 
 
@@ -324,10 +289,10 @@ def apply_stream_overrides(config, args):
         config.setdefault("camera", {}).setdefault("right", {})["stream"] = args.right
 
 
-def update_config_from_runtime(config, left, right, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, display_horizontal_offset, left_color, right_color):
+def update_config_from_runtime(config, left, right, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, left_color, right_color):
     config.setdefault("type", "dvrk_data:stereo_alignment@1.0.0")
-    config.setdefault("name", "dvrk_display")
-    config["display_horizontal_offset_px"] = int(display_horizontal_offset)
+    config.setdefault("name", "stereo_alignment")
+    config.setdefault("preserve_size", True)
 
     cam = config.setdefault("camera", {})
     cam["size"] = {"width": int(original_w), "height": int(original_h)}
@@ -353,7 +318,7 @@ def update_config_from_runtime(config, left, right, original_w, original_h, crop
         cam.pop("alignment", None)
 
 
-def interactive_tune(config, split_mode=False, psm_name=None):
+def interactive_tune(config, split_mode=False):
     app_name = config.get("name", "dvrk_display")
     cam_cfg = config.get("camera", {})
     left = cam_cfg.get("left", {}).get("stream", "").strip()
@@ -366,63 +331,24 @@ def interactive_tune(config, split_mode=False, psm_name=None):
 
     # Resolve left unixfdsrc if stream is empty
     if not left:
-        left_sources = [src for src in config.get("unixfdsources", []) if src.get("name") == "left"]
+        left_sources = [src for src in config.get("unixfdsources", []) if src.get("socket", "") or src.get("name", "") == "left"]
         if left_sources:
-            socket_path = resolve_unixfd_source_path(app_name, left_sources[0])
-            left = f"unixfdsrc socket-path={socket_path} socket-type=abstract do-timestamp=true ! video/x-raw,format=I420,width={original_w},height={original_h}"
-            print(f"Resolved left unixfd source: {socket_path}")
+            socket_field = left_sources[0].get("socket", "left")
+            abstract_name = dvrk_gst.resolve(socket_field, dvrk_gst.ROLE_STEREO_SOURCE)
+            left = dvrk_gst.build_src(abstract_name, original_w, original_h)
+            print(f"Resolved left unixfd source: {abstract_name}")
 
     # Resolve right unixfdsrc if stream is empty
     if not right:
-        right_sources = [src for src in config.get("unixfdsources", []) if src.get("name") == "right"]
+        right_sources = [src for src in config.get("unixfdsources", []) if src.get("socket", "") or src.get("name", "") == "right"]
         if right_sources:
-            socket_path = resolve_unixfd_source_path(app_name, right_sources[0])
-            right = f"unixfdsrc socket-path={socket_path} socket-type=abstract do-timestamp=true ! video/x-raw,format=I420,width={original_w},height={original_h}"
-            print(f"Resolved right unixfd source: {socket_path}")
+            socket_field = right_sources[0].get("socket", "right")
+            abstract_name = dvrk_gst.resolve(socket_field, dvrk_gst.ROLE_STEREO_SOURCE)
+            right = dvrk_gst.build_src(abstract_name, original_w, original_h)
+            print(f"Resolved right unixfd source: {abstract_name}")
 
     if not left or not right:
         raise RuntimeError("Both camera.left.stream and camera.right.stream (or unixfdsources) are required")
-
-    ral = None
-    arm = None
-    oscillating = False
-    oscillation_start_time = 0.0
-    oscillation_amplitude = np.pi / 4.0 # 45 degrees, total 90 (quarter turn)
-    oscillation_frequency = 0.5 # 0.5 Hz
-    initial_jp = None
-
-    oscillation_lock = threading.Lock()
-    def oscillation_thread():
-        nonlocal oscillating, oscillation_start_time, initial_jp
-        rate = ral.create_rate(500) # 500 Hz
-        while rclpy.ok():
-            with oscillation_lock:
-                is_oscillating = oscillating
-                start_time = oscillation_start_time
-                base_jp = initial_jp
-
-            if is_oscillating and arm:
-                elapsed = time.time() - start_time
-                offset = oscillation_amplitude * np.sin(2 * np.pi * oscillation_frequency * elapsed)
-                target_jp = np.copy(base_jp)
-                target_jp[3] = base_jp[3] + offset
-                arm.servo_jp(target_jp)
-            rate.sleep()
-
-    if psm_name:
-        import rclpy
-        if not rclpy.ok():
-            rclpy.init()
-        ral = crtk.ral("dvrk_calibration_gui")
-        arm = dvrk.psm(ral, psm_name)
-        # Spin in background thread for CRTK
-        ral.spin()
-        # Give some time for publishers/subscribers to connect
-        time.sleep(0.5)
-
-        # Start background thread for high-frequency oscillation
-        t_osc = threading.Thread(target=oscillation_thread, daemon=True)
-        t_osc.start()
 
     left_cap = open_capture("left", left)
     right_cap = open_capture("right", right)
@@ -463,10 +389,9 @@ def interactive_tune(config, split_mode=False, psm_name=None):
     cam_align = cam_cfg.get("alignment", {})
     horizontal_shift = int(cam_align.get("horizontal_shift_px", 0))
     vertical_shift = int(cam_align.get("vertical_shift_px", 0))
-    display_horizontal_offset = int(config.get("display_horizontal_offset_px", 0))
-    show_grid = False
     horizontal_shift = clamp_offset_to_valid(original_w, crop_w, horizontal_shift)
     vertical_shift = clamp_offset_to_valid(original_h, crop_h, vertical_shift)
+    show_grid = False
     
     color_calibration_modes = ["none", "left_ref", "right_ref", "average"]
     current_color_mode_idx = 0
@@ -507,7 +432,7 @@ def interactive_tune(config, split_mode=False, psm_name=None):
         f"left={left_w}x{left_h}, right={right_w}x{right_h}, "
         f"original={original_w}x{original_h}"
     )
-    print("Controls: +/- resize (1%), o/p stretch, arrows=shift, []:display_offset, r=reset shift, c=color calib, g=toggle grid, f=fullscreen, q=quit, v=PSM oscillation")
+    print("Controls: +/- resize (1%), o/p stretch, arrows=shift, []:display_offset, r=reset shift, c=color calib, g=toggle grid, f=fullscreen, q=quit")
 
     # Initialize grid for calibration
     grid_rows = 3
@@ -567,8 +492,7 @@ def interactive_tune(config, split_mode=False, psm_name=None):
 
                 # Draw on both eyes
                 for eye_idx, preview_eye in enumerate([left_preview, right_preview]):
-                    sign = -1 if eye_idx == 0 else 1
-                    cx = int(center_x + sign * display_horizontal_offset / 2.0)
+                    cx = center_x
                     start_x = cx - grid_w // 2
                     start_y = curr_h // 2 - grid_h // 2
 
@@ -581,8 +505,7 @@ def interactive_tune(config, split_mode=False, psm_name=None):
 
                 # Draw white circle for aspect ratio calibration (80% of height)
                 for eye_idx, preview_eye in enumerate([left_preview, right_preview]):
-                    sign = -1 if eye_idx == 0 else 1
-                    cx = int(center_x + sign * display_horizontal_offset / 2.0)
+                    cx = center_x
                     cy = curr_h // 2
                     radius = int(curr_h * 0.4)
                     cv2.circle(preview_eye, (cx, cy), radius, (255, 255, 255), 4)
@@ -596,10 +519,9 @@ def interactive_tune(config, split_mode=False, psm_name=None):
                 f"original:{original_w}x{original_h} crop:{crop_w}x{crop_h} "
                 f"resize:{resize_percent}% "
                 f"shift(h,v):({horizontal_shift},{vertical_shift}) "
-                f"display_offset:{display_horizontal_offset} "
                 f"color mode:{mode_name}"
             )
-            controls = "+/-:size o/p:stretch arrows:cam_shift r:reset c:color g:grid []:display_offset f:fs q:quit v:PSM"
+            controls = "+/-:size o/p:stretch arrows:cam_shift r:reset c:color g:grid f:fs q:quit"
             
             if split_mode:
                 cv2.putText(left_preview, info, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
@@ -675,47 +597,14 @@ def interactive_tune(config, split_mode=False, psm_name=None):
                 left_color_calibration, right_color_calibration = calculate_calibration(mode_name, left_out, right_out)
             elif key == KEY_LINE_TOGGLE:
                 show_grid = not show_grid
-            elif key == KEY_LINE_LEFT:
-                display_horizontal_offset -= 2
-            elif key == KEY_LINE_RIGHT:
-                display_horizontal_offset += 2
-            elif key == KEY_PSM_OSCILLATE:
-                if arm:
-                    if not oscillating:
-                        with oscillation_lock:
-                            initial_jp_val, _ = arm.setpoint_jp()
-                            initial_jp = np.array(initial_jp_val)
-                            oscillation_start_time = time.time()
-                            oscillating = True
-                        print(f"Starting oscillation on {psm_name} joint 4...")
-                    else:
-                        with oscillation_lock:
-                            oscillating = False
-                        arm.move_jp(initial_jp)
-                        print(f"Stopped oscillation on {psm_name}.")
-                else:
-                    print("Error: No PSM specified for oscillation. Use -p/--psm [PSM name].")
 
     left_cap.release()
     right_cap.release()
     cv2.destroyAllWindows()
 
-    # If the original streams were resolved, we don't want to save the GStreamer command strings 
-    # to "camera.left.stream" if they were not there originally, unless they were empty.
-    # But wait, we should save whatever left/right streams were resolved so the config remains valid.
-    # If the config file is used with unixfdsources, let's keep left/right stream strings if they were overrides.
-    # Otherwise, if we started with empty left/right stream but resolved via unixfdsources, let's keep them empty
-    # so they continue to resolve dynamically.
-    save_left = cam_cfg.get("left", {}).get("stream", "")
-    save_right = cam_cfg.get("right", {}).get("stream", "")
-    if args_left_override := getattr(interactive_tune, "args_left", None):
-        save_left = args_left_override
-    if args_right_override := getattr(interactive_tune, "args_right", None):
-        save_right = args_right_override
-
     return {
-        "left": save_left,
-        "right": save_right,
+        "left": left,
+        "right": right,
         "original_width": int(original_w),
         "original_height": int(original_h),
         "crop_width": int(crop_w),
@@ -723,7 +612,6 @@ def interactive_tune(config, split_mode=False, psm_name=None):
         "resize_percent": int(resize_percent),
         "horizontal_shift_px": int(horizontal_shift),
         "vertical_shift_px": int(vertical_shift),
-        "display_horizontal_offset_px": int(display_horizontal_offset),
         "left_color": left_color_calibration,
         "right_color": right_color_calibration,
     }
@@ -742,13 +630,9 @@ def main():
     ensure_config_fields(config)
     apply_stream_overrides(config, args)
 
-    # Attach override args to interactive_tune for saving logic
-    interactive_tune.args_left = args.left
-    interactive_tune.args_right = args.right
-
     try:
         split_mode = args.split or "glimages" in config.get("sinks", [])
-        runtime_values = interactive_tune(config, split_mode=split_mode, psm_name=args.psm)
+        runtime_values = interactive_tune(config, split_mode=split_mode)
     except RuntimeError as exc:
         print(f"Error: {exc}")
         return 1
@@ -763,7 +647,6 @@ def main():
         runtime_values["crop_height"],
         runtime_values["horizontal_shift_px"],
         runtime_values["vertical_shift_px"],
-        runtime_values["display_horizontal_offset_px"],
         runtime_values["left_color"],
         runtime_values["right_color"]
     )

@@ -20,6 +20,8 @@ except ImportError:
     print("Error: python3-cairo is required. Install it with: sudo apt install python3-cairo")
     sys.exit(1)
 
+import dvrk_gst_socket as dvrk_gst
+
 class SyntheticSource(Node):
     def __init__(self, left_socket, right_socket, correlation_topic, width, height, fps):
         super().__init__('dvrk_synthetic_source')
@@ -31,25 +33,19 @@ class SyntheticSource(Node):
         
         Gst.init(None)
         
-        # Remove existing socket files to avoid bind errors
-        for socket_path in [left_socket, right_socket]:
-            if os.path.exists(socket_path):
-                try:
-                    os.unlink(socket_path)
-                except OSError:
-                    pass
+        # Abstract sockets are cleaned up by the kernel — no filesystem removal needed.
 
         # Pipeline: videotestsrc -> cairooverlay -> unixfdsink
         pipeline_str = (
             f"videotestsrc pattern=ball is-live=true ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGRA ! "
             "cairooverlay name=overlay_l ! videoconvert ! video/x-raw,format=I420 ! "
             "queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-            f"unixfdsink socket-path={left_socket} sync=true async=false "
-            
+            f"{dvrk_gst.build_sink(left_socket, sync=True)} "
+
             f"videotestsrc pattern=smpte is-live=true ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGRA ! "
             "cairooverlay name=overlay_r ! videoconvert ! video/x-raw,format=I420 ! "
             "queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-            f"unixfdsink socket-path={right_socket} sync=true async=false"
+            f"{dvrk_gst.build_sink(right_socket, sync=True)}"
         )
 
         
@@ -138,12 +134,7 @@ class SyntheticSource(Node):
 
     def stop(self):
         self.pipeline.set_state(Gst.State.NULL)
-        for socket_path in [self.left_socket, self.right_socket]:
-            if os.path.exists(socket_path):
-                try:
-                    os.unlink(socket_path)
-                except OSError:
-                    pass
+        # Abstract sockets are cleaned up by the kernel — no filesystem removal needed.
         if rclpy.ok():
             try:
                 rclpy.shutdown()
@@ -176,8 +167,12 @@ def main():
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
     parser = argparse.ArgumentParser(description="Synthetic unixfd stereo source with a ROS correlation topic")
-    parser.add_argument("--left-socket", default="/tmp/dvrk_test_l")
-    parser.add_argument("--right-socket", default="/tmp/dvrk_test_r")
+    parser.add_argument("--left-socket",
+                        default=dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "left"),
+                        help="Abstract socket name for left stream (default: @dvrk_gst:stereo_source:left)")
+    parser.add_argument("--right-socket",
+                        default=dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "right"),
+                        help="Abstract socket name for right stream (default: @dvrk_gst:stereo_source:right)")
     parser.add_argument("--correlation-topic", default="/dvrk_test/correlation")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
