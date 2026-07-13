@@ -24,13 +24,15 @@ std::string base_name(const std::string &path) {
 }
 
 VideoStream::VideoStream() : pipeline(NULL), valve(NULL), rec_overlay(NULL), preview_widget(NULL), record_checkbox(NULL), retry_button(NULL), stats_label(NULL), stream_name_label(NULL), preview_stack(NULL),
-                is_recording(false), record_enabled(true), frames_recorded(0), frames_dropped(0), last_run_frames_recorded(0), last_run_stage_name(""), current_fps(0.0), estimated_latency(0.0),
+                has_current_segment(false), is_recording(false), record_enabled(true), frames_recorded(0), frames_dropped(0), last_run_frames_recorded(0), last_run_stage_name(""), current_fps(0.0), estimated_latency(0.0),
                 cpu_ts_from_unixfd_count(0), cpu_ts_at_reception_count(0),
                 width(0), height(0), src_fps(0.0), last_src_ts(0), src_frame_counter(0),
                 rec_width(0), rec_height(0), rec_fps_requested(0.0),
                 total_offset_ns(0), last_raw_buffer_ts(-1), last_duration(0),
                 last_fps_ts(0), fps_frame_counter(0),
-                has_error(false), auto_retry_attempted(false), auto_retry_in_progress(false), m_ad(NULL), m_has_config(false), m_error_segment_index(0) {}
+                has_error(false), auto_retry_attempted(false), auto_retry_in_progress(false), m_ad(NULL), m_has_config(false), m_error_segment_index(0) {
+    gst_segment_init(&current_segment, GST_FORMAT_TIME);
+}
 
 VideoStream::~VideoStream() {
     // Pipeline should already be shut down via shutdown()
@@ -203,7 +205,10 @@ bool VideoStream::create(AppData* ad, const dc::VideoConfig* v) {
     if (this->valve) {
         GstPad *vpad = gst_element_get_static_pad(this->valve, "src");
         if (vpad) {
-            gst_pad_add_probe(vpad, GST_PAD_PROBE_TYPE_BUFFER, timestamp_probe_cb, this, NULL);
+            gst_pad_add_probe(vpad,
+                              static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BUFFER |
+                                                           GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM),
+                              timestamp_probe_cb, this, NULL);
             gst_object_unref(vpad);
         }
     }
@@ -309,31 +314,91 @@ void VideoStream::stop_and_save(const std::vector<std::string>& config_files) {
 
     if (this->record_enabled && !this->output_json.empty() && !this->frames.empty()) {
         Json::Value root;
-        root["type"] = "dvrk_data:sidecar@1.0.0";
+        root["type"] = "dvrk_data:video_sidecar@1.0.0";
+        root["video_file"] = base_name(this->output_video);
         root["stream_name"] = this->name;
-        root["start_timestamp_ns"] = this->frames.empty() ? 0 : (Json::Value::Int64)this->frames.front().cpu_ts;
-        root["end_timestamp_ns"] = this->frames.empty() ? 0 : (Json::Value::Int64)this->frames.back().cpu_ts;
+        root["start_cpu_realtime_ns"] = (Json::Value::Int64)this->frames.front().preferred_capture_time_ns;
+        root["end_cpu_realtime_ns"] = (Json::Value::Int64)this->frames.back().preferred_capture_time_ns;
 
         Json::Value cpuTsObj(Json::objectValue);
         cpuTsObj["from_unixfd"] = (Json::Value::Int64)this->cpu_ts_from_unixfd_count;
         cpuTsObj["at_reception"] = (Json::Value::Int64)this->cpu_ts_at_reception_count;
-        root["cpu_ts"] = cpuTsObj;
+        root["timestamp_statistics"] = cpuTsObj;
         root["frames_recorded"] = (int)this->frames_recorded;
         root["frames_dropped"] = (int)this->frames_dropped;
         root["side_by_side"] = this->side_by_side;
-        root["estimated_latency_ms"] = this->estimated_latency;
+        root["estimated_latency_ms"] = this->estimated_latency * 1000.0;
+
+        Json::Value clockDomains(Json::objectValue);
+        clockDomains["cpu_realtime"]["clock"] = "CLOCK_REALTIME";
+        clockDomains["cpu_realtime"]["epoch"] = "unix";
+        clockDomains["cpu_realtime"]["unit"] = "ns";
+        clockDomains["cpu_monotonic"]["clock"] = "CLOCK_MONOTONIC";
+        clockDomains["cpu_monotonic"]["epoch"] = "unspecified";
+        clockDomains["cpu_monotonic"]["unit"] = "ns";
+        clockDomains["gst_clock"]["unit"] = "ns";
+        if (this->pipeline) {
+            GstClock *clock = gst_element_get_clock(this->pipeline);
+            if (clock) {
+                clockDomains["gst_clock"]["clock"] = GST_OBJECT_NAME(clock);
+                clockDomains["gst_clock"]["epoch"] = "clock-defined";
+                gst_object_unref(clock);
+            }
+        }
+        root["clock_domains"] = clockDomains;
 
         Json::Value frame_list = Json::arrayValue;
         for (size_t i = 0; i < this->frames.size(); ++i) {
             auto &f = this->frames[i];
             Json::Value fv;
-            fv["cpu_ns"] = (Json::Value::Int64)f.cpu_ts;
-            fv["gst_ns"] = (Json::Value::Int64)f.buffer_ts_ns;
-            fv["mono_source_ns"] = (Json::Value::Int64)f.mono_source_ts;
-            fv["left_source_ns"] = (Json::Value::Int64)f.left_source_ts;
-            fv["right_source_ns"] = (Json::Value::Int64)f.right_source_ts;
-            fv["stereo_output_ns"] = (Json::Value::Int64)f.stereo_output_ts;
-            fv["overlay_output_ns"] = (Json::Value::Int64)f.overlay_output_ts;
+            fv["frame_index"] = (Json::Value::UInt64)i;
+            Json::Value gst(Json::objectValue);
+            auto set_gst_time = [&gst](const char *name, long long value) {
+                if (GST_CLOCK_TIME_IS_VALID(static_cast<GstClockTime>(value)))
+                    gst[name] = (Json::Value::Int64)value;
+                else
+                    gst[name] = Json::nullValue;
+            };
+            set_gst_time("pts_ns", f.gst_pts_ns);
+            set_gst_time("dts_ns", f.gst_dts_ns);
+            set_gst_time("duration_ns", f.gst_duration_ns);
+            set_gst_time("running_time_ns", f.gst_running_time_ns);
+            set_gst_time("stream_time_ns", f.gst_stream_time_ns);
+            set_gst_time("clock_time_ns", f.gst_clock_time_ns);
+            fv["gst"] = gst;
+
+            auto nullable_cpu_time = [](long long value) -> Json::Value {
+                return value == 0 ? Json::Value(Json::nullValue)
+                                  : Json::Value((Json::Value::Int64)value);
+            };
+            Json::Value realtime(Json::objectValue);
+            realtime["mono_source_ns"] = nullable_cpu_time(f.cpu_realtime_mono_source_ns);
+            realtime["left_source_ns"] = nullable_cpu_time(f.cpu_realtime_left_source_ns);
+            realtime["right_source_ns"] = nullable_cpu_time(f.cpu_realtime_right_source_ns);
+            realtime["stereo_output_ns"] = nullable_cpu_time(f.cpu_realtime_stereo_output_ns);
+            realtime["overlay_output_ns"] = nullable_cpu_time(f.cpu_realtime_overlay_output_ns);
+            realtime["recorder_reception_ns"] = (Json::Value::Int64)f.cpu_realtime_recorder_reception_ns;
+            fv["cpu"]["realtime"] = realtime;
+            fv["cpu"]["monotonic"]["recorder_reception_ns"] =
+                (Json::Value::Int64)f.cpu_monotonic_recorder_reception_ns;
+            fv["derived"]["preferred_capture_time_ns"] =
+                (Json::Value::Int64)f.preferred_capture_time_ns;
+            fv["derived"]["preferred_capture_time_clock"] = "cpu_realtime";
+            const char *preferred_source = "recorder_reception";
+            if (f.cpu_realtime_overlay_output_ns != 0)
+                preferred_source = "overlay_output";
+            else if (f.cpu_realtime_stereo_output_ns != 0)
+                preferred_source = "stereo_output";
+            else if (f.cpu_realtime_mono_source_ns != 0)
+                preferred_source = "mono_source";
+            else if (f.cpu_realtime_left_source_ns != 0 &&
+                     f.cpu_realtime_right_source_ns != 0)
+                preferred_source = "stereo_source_midpoint";
+            else if (f.cpu_realtime_left_source_ns != 0)
+                preferred_source = "left_source";
+            else if (f.cpu_realtime_right_source_ns != 0)
+                preferred_source = "right_source";
+            fv["derived"]["preferred_capture_time_source"] = preferred_source;
             frame_list.append(fv);
         }
         root["frames"] = frame_list;
@@ -382,7 +447,8 @@ double VideoStream::compute_segment_duration_seconds() const {
 
     long long accum_ns = 0;
     for (size_t i = 0; i + 1 < this->frames.size(); ++i) {
-        const long long diff = this->frames[i + 1].cpu_ts - this->frames[i].cpu_ts;
+        const long long diff = this->frames[i + 1].preferred_capture_time_ns -
+                               this->frames[i].preferred_capture_time_ns;
         if (diff > 0 && diff < 500 * 1000000LL) {
             accum_ns += diff;
         }

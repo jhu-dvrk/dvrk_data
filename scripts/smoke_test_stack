@@ -223,7 +223,7 @@ def check_recording_output(output_dir):
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        if data.get("type") == "dvrk_data:sidecar@1.0.0":
+        if data.get("type") == "dvrk_data:video_sidecar@1.0.0":
             sidecars.append(path)
     rosbags = [p for p in output_dir.rglob("*") if p.is_dir() and p.name == "rosbag"]
     if not mp4s:

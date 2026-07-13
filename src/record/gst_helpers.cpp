@@ -182,7 +182,11 @@ GstPadProbeReturn audio_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, g
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         long long cpu_ts = (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-        as->frames.push_back({cpu_ts, buffer_ts_ns, 0, 0, 0, 0, 0});
+        FrameData frame;
+        frame.preferred_capture_time_ns = cpu_ts;
+        frame.cpu_realtime_recorder_reception_ns = cpu_ts;
+        frame.gst_pts_ns = buffer_ts_ns;
+        as->frames.push_back(frame);
         as->cpu_ts_at_reception_count++;
     }
     return GST_PAD_PROBE_OK;
@@ -191,6 +195,18 @@ GstPadProbeReturn audio_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, g
 GstPadProbeReturn timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
     (void)pad;
     VideoStream *s = (VideoStream *)user_data;
+    if (info->type & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM) {
+        GstEvent *event = GST_PAD_PROBE_INFO_EVENT(info);
+        if (event && GST_EVENT_TYPE(event) == GST_EVENT_SEGMENT) {
+            const GstSegment *segment = nullptr;
+            gst_event_parse_segment(event, &segment);
+            if (segment && segment->format == GST_FORMAT_TIME) {
+                gst_segment_copy_into(segment, &s->current_segment);
+                s->has_current_segment = true;
+            }
+        }
+        return GST_PAD_PROBE_OK;
+    }
     if (s->is_recording && (info->type & GST_PAD_PROBE_TYPE_BUFFER)) {
         GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
         if (!gst_buffer_is_writable(buf)) {
@@ -209,11 +225,17 @@ GstPadProbeReturn timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointe
                  if (gap > 0) s->total_offset_ns += gap;
             }
         }
-        // Capture original buffer timestamp
-        long long buffer_ts_ns = buffer_ts;
         const DcFrameTimestamps frame_timestamps =
             dc_buffer_get_frame_timestamps(buf);
         const bool has_remote_timestamps = dc_buffer_has_frame_timestamps(buf);
+        struct timespec realtime_ts;
+        struct timespec monotonic_ts;
+        clock_gettime(CLOCK_REALTIME, &realtime_ts);
+        clock_gettime(CLOCK_MONOTONIC, &monotonic_ts);
+        const long long reception_realtime_ns =
+            (long long)realtime_ts.tv_sec * 1000000000LL + realtime_ts.tv_nsec;
+        const long long reception_monotonic_ns =
+            (long long)monotonic_ts.tv_sec * 1000000000LL + monotonic_ts.tv_nsec;
         long long cpu_ts;
         if (frame_timestamps.overlay_output_ts != 0) {
             cpu_ts = static_cast<long long>(frame_timestamps.overlay_output_ts);
@@ -235,9 +257,7 @@ GstPadProbeReturn timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointe
             cpu_ts = static_cast<long long>(frame_timestamps.right_source_ts);
         } else {
             // Fallback: capture locally (for non-unixfd sources)
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            cpu_ts = (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+            cpu_ts = reception_realtime_ns;
         }
 
         if (has_remote_timestamps) {
@@ -246,12 +266,32 @@ GstPadProbeReturn timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointe
             s->cpu_ts_at_reception_count++;
         }
 
-        s->frames.push_back({cpu_ts, buffer_ts_ns,
-                             static_cast<long long>(frame_timestamps.mono_source_ts),
-                             static_cast<long long>(frame_timestamps.left_source_ts),
-                             static_cast<long long>(frame_timestamps.right_source_ts),
-                             static_cast<long long>(frame_timestamps.stereo_output_ts),
-                             static_cast<long long>(frame_timestamps.overlay_output_ts)});
+        FrameData frame;
+        frame.preferred_capture_time_ns = cpu_ts;
+        frame.cpu_realtime_recorder_reception_ns = reception_realtime_ns;
+        frame.cpu_monotonic_recorder_reception_ns = reception_monotonic_ns;
+        frame.cpu_realtime_mono_source_ns = frame_timestamps.mono_source_ts;
+        frame.cpu_realtime_left_source_ns = frame_timestamps.left_source_ts;
+        frame.cpu_realtime_right_source_ns = frame_timestamps.right_source_ts;
+        frame.cpu_realtime_stereo_output_ns = frame_timestamps.stereo_output_ts;
+        frame.cpu_realtime_overlay_output_ns = frame_timestamps.overlay_output_ts;
+        frame.gst_pts_ns = GST_BUFFER_PTS(buf);
+        frame.gst_dts_ns = GST_BUFFER_DTS(buf);
+        frame.gst_duration_ns = GST_BUFFER_DURATION(buf);
+        if (s->has_current_segment) {
+            frame.gst_running_time_ns = gst_segment_to_running_time(
+                &s->current_segment, GST_FORMAT_TIME, GST_BUFFER_PTS(buf));
+            frame.gst_stream_time_ns = gst_segment_to_stream_time(
+                &s->current_segment, GST_FORMAT_TIME, GST_BUFFER_PTS(buf));
+        }
+        if (s->pipeline) {
+            GstClock *clock = gst_element_get_clock(s->pipeline);
+            if (clock) {
+                frame.gst_clock_time_ns = gst_clock_get_time(clock);
+                gst_object_unref(clock);
+            }
+        }
+        s->frames.push_back(frame);
         s->frames_recorded++;
 
         long long now = g_get_monotonic_time();

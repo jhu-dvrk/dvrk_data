@@ -220,7 +220,7 @@ void TagWindow::load_sidecar_json() {
         return;
     }
 
-    if (!dc::Config::check_type(root, "dvrk_data:sidecar@1.0.0", json_file)) {
+    if (!dc::Config::check_type(root, "dvrk_data:video_sidecar@1.0.0", json_file)) {
         return;
     }
 
@@ -229,16 +229,22 @@ void TagWindow::load_sidecar_json() {
         m_data.frame_gst_timestamps.clear();
 
         for (const auto& frame : root["frames"]) {
-            if (frame.isMember("cpu_ts")) {
-                m_data.frame_cpu_timestamps.push_back(frame["cpu_ts"].asInt64());
-            } else {
-                m_data.frame_cpu_timestamps.push_back(0);
+            const Json::Value& preferred = frame["derived"]["preferred_capture_time_ns"];
+            const Json::Value& pts = frame["gst"]["pts_ns"];
+            if (!preferred.isInt64() && !preferred.isUInt64()) {
+                std::cerr << "Invalid preferred capture timestamp in " << json_file << std::endl;
+                m_data.frame_cpu_timestamps.clear();
+                m_data.frame_gst_timestamps.clear();
+                return;
             }
-
-            long long t = 0;
-            if (frame.isMember("gst_ts")) {
-                t = frame["gst_ts"].asInt64();
+            if (!pts.isInt64() && !pts.isUInt64()) {
+                std::cerr << "Missing GStreamer PTS in " << json_file << std::endl;
+                m_data.frame_cpu_timestamps.clear();
+                m_data.frame_gst_timestamps.clear();
+                return;
             }
+            m_data.frame_cpu_timestamps.push_back(preferred.asInt64());
+            const long long t = pts.asInt64();
 
             // DO NOT SUBTRACT first_gst_ts. 
             // GStreamer pipeline (qtdemux/h264parse) uses absolute file PTS.
@@ -247,9 +253,8 @@ void TagWindow::load_sidecar_json() {
         }
     }
 
-    // Load recording_start_cpu_ts if available as session reference
-    if (root.isMember("recording_start_cpu_ts")) {
-        m_data.session_start_cpu_ns = root["recording_start_cpu_ts"].asInt64();
+    if (root.isMember("start_cpu_realtime_ns")) {
+        m_data.session_start_cpu_ns = root["start_cpu_realtime_ns"].asInt64();
     } else if (!m_data.frame_cpu_timestamps.empty()) {
         m_data.session_start_cpu_ns = m_data.frame_cpu_timestamps[0];
     }

@@ -96,8 +96,8 @@ void AudioStream::stop_and_save(const std::vector<std::string>& config_files) {
     if (!this->output_json.empty()) {
         Json::Value aroot;
         aroot["stream_name"] = "audio";
-        aroot["start_timestamp_ns"] = this->frames.empty() ? 0 : (Json::Value::Int64)this->frames.front().cpu_ts;
-        aroot["end_timestamp_ns"] = this->frames.empty() ? 0 : (Json::Value::Int64)this->frames.back().cpu_ts;
+        aroot["start_timestamp_ns"] = this->frames.empty() ? 0 : (Json::Value::Int64)this->frames.front().preferred_capture_time_ns;
+        aroot["end_timestamp_ns"] = this->frames.empty() ? 0 : (Json::Value::Int64)this->frames.back().preferred_capture_time_ns;
 
         Json::Value cpuTsObj(Json::objectValue);
         cpuTsObj["from_unixfd"] = (Json::Value::Int64)this->cpu_ts_from_unixfd_count;
@@ -107,8 +107,8 @@ void AudioStream::stop_and_save(const std::vector<std::string>& config_files) {
         Json::Value alist = Json::arrayValue;
         for (const auto& f : this->frames) {
             Json::Value fv;
-            fv["cpu_ns"] = (Json::Value::Int64)f.cpu_ts;
-            fv["gst_ns"] = (Json::Value::Int64)f.buffer_ts_ns;
+            fv["cpu_ns"] = (Json::Value::Int64)f.preferred_capture_time_ns;
+            fv["gst_ns"] = (Json::Value::Int64)f.gst_pts_ns;
             alist.append(fv);
         }
         aroot["frames"] = alist;

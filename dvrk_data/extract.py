@@ -324,7 +324,7 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
         print(f"Error reading {json_path}: {e}")
         return
 
-    if data.get("type") != "dvrk_data:sidecar@1.0.0":
+    if data.get("type") != "dvrk_data:video_sidecar@1.0.0":
         print(f"CRITICAL: Unsupported sidecar type in {json_path}: {data.get('type')}")
         return
 
@@ -346,13 +346,17 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
         print(f"CRITICAL: Sidecar {json_path} is missing current frames[] data")
         return
 
-    missing = [i for i, f in enumerate(frames) if "cpu_ns" not in f or "gst_ns" not in f]
+    missing = [i for i, f in enumerate(frames)
+               if not isinstance(f.get("derived"), dict)
+               or not isinstance(f.get("gst"), dict)
+               or "preferred_capture_time_ns" not in f["derived"]
+               or f["gst"].get("pts_ns") is None]
     if missing:
-        print(f"CRITICAL: Sidecar {json_path} has frames without cpu_ns/gst_ns")
+        print(f"CRITICAL: Sidecar {json_path} has frames without preferred capture time/GStreamer PTS")
         return
 
-    timestamps = [f["cpu_ns"] for f in frames]
-    gst_timestamps = [f["gst_ns"] for f in frames]
+    timestamps = [f["derived"]["preferred_capture_time_ns"] for f in frames]
+    gst_timestamps = [f["gst"]["pts_ns"] for f in frames]
     is_ns = True
     is_ms = False
 
@@ -488,7 +492,10 @@ def main():
                             v_data = json.load(vf)
                             source_v_latency = v_data.get("estimated_latency_ms", 0.0) / 1000.0
                             frames = v_data.get("frames", [])
-                            source_v_ts = [f["cpu_ns"] for f in frames if "cpu_ns" in f]
+                            source_v_ts = [f["derived"]["preferred_capture_time_ns"]
+                                           for f in frames
+                                           if isinstance(f.get("derived"), dict)
+                                           and "preferred_capture_time_ns" in f["derived"]]
                     break
 
         stage_counts = {}

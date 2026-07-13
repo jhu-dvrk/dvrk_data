@@ -42,6 +42,8 @@ public:
     std::string output_video, output_json;
     std::string pipeline_desc;
     std::vector<FrameData> frames;
+    GstSegment current_segment;
+    bool has_current_segment;
     bool is_recording, record_enabled;
     long long frames_recorded, frames_dropped;
     long long last_run_frames_recorded;

@@ -48,12 +48,9 @@ def convert_encord_to_tags(encord_path, sidecar_path, output_path=None):
     with open(sidecar_path, 'r') as f:
         sidecar_data = json.load(f)
     
-    # Check if this is a camera sidecar (with timestamps_ns) or a generic one (with frames)
-    if 'timestamps_ns' in sidecar_data:
-        timestamps_ns = sidecar_data['timestamps_ns']
-        frames = [{"cpu_ts": ts / 1e9} for ts in timestamps_ns]
-    else:
-        frames = sidecar_data.get('frames', [])
+    if sidecar_data.get('type') != 'dvrk_data:video_sidecar@1.0.0':
+        raise ValueError(f"Unsupported sidecar type: {sidecar_data.get('type')}")
+    frames = sidecar_data.get('frames', [])
 
     num_frames = len(frames)
     
@@ -96,8 +93,8 @@ def convert_encord_to_tags(encord_path, sidecar_path, output_path=None):
                 print(f"Warning: Range [{start_frame}, {end_frame}] is out of bounds for sidecar with {num_frames} frames.")
                 continue
 
-            start_ts = frames[start_frame]['cpu_ts']
-            end_ts = frames[end_frame]['cpu_ts']
+            start_ts = frames[start_frame]['derived']['preferred_capture_time_ns']
+            end_ts = frames[end_frame]['derived']['preferred_capture_time_ns']
             
             stage_entry = {
                 "name": name,

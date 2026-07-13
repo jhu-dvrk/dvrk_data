@@ -1,0 +1,131 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "dvrk_data:video_sidecar@1.0.0",
+  "title": "dVRK Video Sidecar Metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type", "video_file", "stream_name", "start_cpu_realtime_ns",
+    "end_cpu_realtime_ns", "timestamp_statistics", "frames_recorded",
+    "frames_dropped", "side_by_side", "estimated_latency_ms",
+    "clock_domains", "config_files", "frames"
+  ],
+  "properties": {
+    "type": { "const": "dvrk_data:video_sidecar@1.0.0" },
+    "video_file": { "type": "string", "minLength": 1 },
+    "stream_name": { "type": "string", "minLength": 1 },
+    "start_cpu_realtime_ns": { "$ref": "#/$defs/nonnegativeInteger" },
+    "end_cpu_realtime_ns": { "$ref": "#/$defs/nonnegativeInteger" },
+    "timestamp_statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_unixfd", "at_reception"],
+      "properties": {
+        "from_unixfd": { "$ref": "#/$defs/nonnegativeInteger" },
+        "at_reception": { "$ref": "#/$defs/nonnegativeInteger" }
+      }
+    },
+    "frames_recorded": { "$ref": "#/$defs/nonnegativeInteger" },
+    "frames_dropped": { "$ref": "#/$defs/nonnegativeInteger" },
+    "side_by_side": { "enum": ["undefined", "LR", "RL"] },
+    "estimated_latency_ms": { "type": "number", "minimum": 0 },
+    "clock_domains": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_realtime", "cpu_monotonic", "gst_clock"],
+      "properties": {
+        "cpu_realtime": { "$ref": "#/$defs/clockDomain" },
+        "cpu_monotonic": { "$ref": "#/$defs/clockDomain" },
+        "gst_clock": { "$ref": "#/$defs/clockDomain" }
+      }
+    },
+    "config_files": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "frames": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/frame" }
+    }
+  },
+  "$defs": {
+    "nonnegativeInteger": { "type": "integer", "minimum": 0 },
+    "nullableTimestamp": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonnegativeInteger" },
+        { "type": "null" }
+      ]
+    },
+    "clockDomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit"],
+      "properties": {
+        "clock": { "type": "string", "minLength": 1 },
+        "epoch": { "type": "string", "minLength": 1 },
+        "unit": { "const": "ns" }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_index", "gst", "cpu", "derived"],
+      "properties": {
+        "frame_index": { "$ref": "#/$defs/nonnegativeInteger" },
+        "gst": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pts_ns", "dts_ns", "duration_ns", "running_time_ns", "stream_time_ns", "clock_time_ns"],
+          "properties": {
+            "pts_ns": { "$ref": "#/$defs/nullableTimestamp" },
+            "dts_ns": { "$ref": "#/$defs/nullableTimestamp" },
+            "duration_ns": { "$ref": "#/$defs/nullableTimestamp" },
+            "running_time_ns": { "$ref": "#/$defs/nullableTimestamp" },
+            "stream_time_ns": { "$ref": "#/$defs/nullableTimestamp" },
+            "clock_time_ns": { "$ref": "#/$defs/nullableTimestamp" }
+          }
+        },
+        "cpu": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["realtime", "monotonic"],
+          "properties": {
+            "realtime": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mono_source_ns", "left_source_ns", "right_source_ns", "stereo_output_ns", "overlay_output_ns", "recorder_reception_ns"],
+              "properties": {
+                "mono_source_ns": { "$ref": "#/$defs/nullableTimestamp" },
+                "left_source_ns": { "$ref": "#/$defs/nullableTimestamp" },
+                "right_source_ns": { "$ref": "#/$defs/nullableTimestamp" },
+                "stereo_output_ns": { "$ref": "#/$defs/nullableTimestamp" },
+                "overlay_output_ns": { "$ref": "#/$defs/nullableTimestamp" },
+                "recorder_reception_ns": { "$ref": "#/$defs/nonnegativeInteger" }
+              }
+            },
+            "monotonic": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["recorder_reception_ns"],
+              "properties": {
+                "recorder_reception_ns": { "$ref": "#/$defs/nonnegativeInteger" }
+              }
+            }
+          }
+        },
+        "derived": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["preferred_capture_time_ns", "preferred_capture_time_clock", "preferred_capture_time_source"],
+          "properties": {
+            "preferred_capture_time_ns": { "$ref": "#/$defs/nonnegativeInteger" },
+            "preferred_capture_time_clock": { "const": "cpu_realtime" },
+            "preferred_capture_time_source": {
+              "enum": ["mono_source", "left_source", "right_source", "stereo_source_midpoint", "stereo_output", "overlay_output", "recorder_reception"]
+            }
+          }
+        }
+      }
+    }
+  }
+}
