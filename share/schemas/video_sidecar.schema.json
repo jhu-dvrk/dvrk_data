@@ -1,7 +1,8 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "dvrk_data:video_sidecar@1.0.0",
   "title": "dVRK Video Sidecar Metadata",
+  "description": "Metadata written next to one recorded video file. It preserves every timestamp observed for each recorded frame, identifies each clock domain and records the derived capture time used by downstream dVRK tools.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,46 +12,102 @@
     "clock_domains", "config_files", "frames"
   ],
   "properties": {
-    "type": { "const": "dvrk_data:video_sidecar@1.0.0" },
-    "video_file": { "type": "string", "minLength": 1 },
-    "stream_name": { "type": "string", "minLength": 1 },
-    "start_cpu_realtime_ns": { "$ref": "#/$defs/nonnegativeInteger" },
-    "end_cpu_realtime_ns": { "$ref": "#/$defs/nonnegativeInteger" },
+    "type": {
+      "const": "dvrk_data:video_sidecar@1.0.0",
+      "description": "Versioned document-type identifier used by readers to select this exact schema."
+    },
+    "video_file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Base name of the MP4 file described by this sidecar, relative to the sidecar directory.",
+      "examples": ["stereo.mp4"]
+    },
+    "stream_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Logical video-stream name copied from the recording configuration.",
+      "examples": ["stereo"]
+    },
+    "start_cpu_realtime_ns": {
+      "$ref": "#/$defs/nonnegativeInteger",
+      "description": "Preferred capture time of the first recorded frame, in nanoseconds since the Unix epoch (CLOCK_REALTIME)."
+    },
+    "end_cpu_realtime_ns": {
+      "$ref": "#/$defs/nonnegativeInteger",
+      "description": "Preferred capture time of the last recorded frame, in nanoseconds since the Unix epoch (CLOCK_REALTIME)."
+    },
     "timestamp_statistics": {
       "type": "object",
+      "description": "Counts describing whether each preferred CPU timestamp came from transported frame metadata or was sampled by the recorder.",
       "additionalProperties": false,
       "required": ["from_unixfd", "at_reception"],
       "properties": {
-        "from_unixfd": { "$ref": "#/$defs/nonnegativeInteger" },
-        "at_reception": { "$ref": "#/$defs/nonnegativeInteger" }
+        "from_unixfd": {
+          "$ref": "#/$defs/nonnegativeInteger",
+          "description": "Number of recorded frames carrying timestamp metadata transported through unixfd."
+        },
+        "at_reception": {
+          "$ref": "#/$defs/nonnegativeInteger",
+          "description": "Number of recorded frames for which the preferred capture time fell back to recorder reception time."
+        }
       }
     },
-    "frames_recorded": { "$ref": "#/$defs/nonnegativeInteger" },
-    "frames_dropped": { "$ref": "#/$defs/nonnegativeInteger" },
-    "side_by_side": { "enum": ["undefined", "LR", "RL"] },
-    "estimated_latency_ms": { "type": "number", "minimum": 0 },
+    "frames_recorded": {
+      "$ref": "#/$defs/nonnegativeInteger",
+      "description": "Number of buffers observed on the recording branch and represented in frames."
+    },
+    "frames_dropped": {
+      "$ref": "#/$defs/nonnegativeInteger",
+      "description": "Number of recording-queue overruns detected while producing this file."
+    },
+    "side_by_side": {
+      "enum": ["undefined", "LR", "RL"],
+      "description": "Stereo layout: LR places the left eye in the left half, RL places the right eye in the left half, and undefined means non-stereo or unknown."
+    },
+    "estimated_latency_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Configured estimate of capture-to-display video latency in milliseconds. Downstream tools may subtract it when correlating video with acquisition timestamps."
+    },
     "clock_domains": {
       "type": "object",
+      "description": "Clock-domain declarations needed to interpret timestamp values in frames.",
       "additionalProperties": false,
       "required": ["cpu_realtime", "cpu_monotonic", "gst_clock"],
       "properties": {
-        "cpu_realtime": { "$ref": "#/$defs/clockDomain" },
-        "cpu_monotonic": { "$ref": "#/$defs/clockDomain" },
-        "gst_clock": { "$ref": "#/$defs/clockDomain" }
+        "cpu_realtime": {
+          "$ref": "#/$defs/clockDomain",
+          "description": "CLOCK_REALTIME domain used for Unix-epoch timestamps and cross-process correlation."
+        },
+        "cpu_monotonic": {
+          "$ref": "#/$defs/clockDomain",
+          "description": "CLOCK_MONOTONIC domain used for local elapsed-time and latency measurements; it has no wall-clock epoch."
+        },
+        "gst_clock": {
+          "$ref": "#/$defs/clockDomain",
+          "description": "Clock selected by the GStreamer pipeline and sampled when each frame reaches the recorder probe."
+        }
       }
     },
     "config_files": {
       "type": "array",
+      "description": "Configuration-file paths supplied to record for the session, in command-line order.",
       "items": { "type": "string", "minLength": 1 }
     },
     "frames": {
       "type": "array",
+      "description": "Per-frame timestamp records in recording order. Array position and frame_index are zero-based.",
       "items": { "$ref": "#/$defs/frame" }
     }
   },
   "$defs": {
-    "nonnegativeInteger": { "type": "integer", "minimum": 0 },
+    "nonnegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "A non-negative integer. Timestamp fields using this definition state their unit and clock domain in their own descriptions."
+    },
     "nullableTimestamp": {
+      "description": "A non-negative nanosecond timestamp, or null when that timestamp was unavailable for the frame.",
       "oneOf": [
         { "$ref": "#/$defs/nonnegativeInteger" },
         { "type": "null" }
@@ -58,70 +115,137 @@
     },
     "clockDomain": {
       "type": "object",
+      "description": "Description of a clock whose values occur in this sidecar.",
       "additionalProperties": false,
       "required": ["unit"],
       "properties": {
-        "clock": { "type": "string", "minLength": 1 },
-        "epoch": { "type": "string", "minLength": 1 },
-        "unit": { "const": "ns" }
+        "clock": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Operating-system clock name or GStreamer clock object name, when known."
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Origin of the clock values, such as unix, unspecified, or clock-defined."
+        },
+        "unit": {
+          "const": "ns",
+          "description": "Unit used for every timestamp in this clock domain: nanoseconds."
+        }
       }
     },
     "frame": {
       "type": "object",
+      "description": "All timestamps and derived timing metadata associated with one recorded video frame.",
       "additionalProperties": false,
       "required": ["frame_index", "gst", "cpu", "derived"],
       "properties": {
-        "frame_index": { "$ref": "#/$defs/nonnegativeInteger" },
+        "frame_index": {
+          "$ref": "#/$defs/nonnegativeInteger",
+          "description": "Zero-based index of this frame within the recorded video segment and frames array."
+        },
         "gst": {
           "type": "object",
+          "description": "Timestamps from the GStreamer buffer, segment and selected pipeline clock.",
           "additionalProperties": false,
           "required": ["pts_ns", "dts_ns", "duration_ns", "running_time_ns", "stream_time_ns", "clock_time_ns"],
           "properties": {
-            "pts_ns": { "$ref": "#/$defs/nullableTimestamp" },
-            "dts_ns": { "$ref": "#/$defs/nullableTimestamp" },
-            "duration_ns": { "$ref": "#/$defs/nullableTimestamp" },
-            "running_time_ns": { "$ref": "#/$defs/nullableTimestamp" },
-            "stream_time_ns": { "$ref": "#/$defs/nullableTimestamp" },
-            "clock_time_ns": { "$ref": "#/$defs/nullableTimestamp" }
+            "pts_ns": {
+              "$ref": "#/$defs/nullableTimestamp",
+              "description": "Buffer presentation timestamp (GST_BUFFER_PTS), in nanoseconds in the active segment timestamp domain."
+            },
+            "dts_ns": {
+              "$ref": "#/$defs/nullableTimestamp",
+              "description": "Buffer decoding timestamp (GST_BUFFER_DTS), in nanoseconds; null when the buffer has no DTS."
+            },
+            "duration_ns": {
+              "$ref": "#/$defs/nullableTimestamp",
+              "description": "Buffer duration (GST_BUFFER_DURATION), in nanoseconds; null when unknown."
+            },
+            "running_time_ns": {
+              "$ref": "#/$defs/nullableTimestamp",
+              "description": "PTS converted through the active GstSegment to GStreamer running time, in nanoseconds. Running time is used for pipeline synchronization."
+            },
+            "stream_time_ns": {
+              "$ref": "#/$defs/nullableTimestamp",
+              "description": "PTS converted through the active GstSegment to stream time, in nanoseconds. Stream time represents position in the media timeline."
+            },
+            "clock_time_ns": {
+              "$ref": "#/$defs/nullableTimestamp",
+              "description": "Value of the pipeline-selected GstClock sampled when the frame reached the recorder probe, in nanoseconds in gst_clock."
+            }
           }
         },
         "cpu": {
           "type": "object",
+          "description": "CPU-clock observations grouped by their explicit clock domain.",
           "additionalProperties": false,
           "required": ["realtime", "monotonic"],
           "properties": {
             "realtime": {
               "type": "object",
+              "description": "Frame observations made with CLOCK_REALTIME, expressed as nanoseconds since the Unix epoch.",
               "additionalProperties": false,
               "required": ["mono_source_ns", "left_source_ns", "right_source_ns", "stereo_output_ns", "overlay_output_ns", "recorder_reception_ns"],
               "properties": {
-                "mono_source_ns": { "$ref": "#/$defs/nullableTimestamp" },
-                "left_source_ns": { "$ref": "#/$defs/nullableTimestamp" },
-                "right_source_ns": { "$ref": "#/$defs/nullableTimestamp" },
-                "stereo_output_ns": { "$ref": "#/$defs/nullableTimestamp" },
-                "overlay_output_ns": { "$ref": "#/$defs/nullableTimestamp" },
-                "recorder_reception_ns": { "$ref": "#/$defs/nonnegativeInteger" }
+                "mono_source_ns": {
+                  "$ref": "#/$defs/nullableTimestamp",
+                  "description": "Time a monoscopic source produced or timestamped this frame; null for stereo sources or when unavailable."
+                },
+                "left_source_ns": {
+                  "$ref": "#/$defs/nullableTimestamp",
+                  "description": "Time the left-eye source produced or timestamped this frame; null when unavailable."
+                },
+                "right_source_ns": {
+                  "$ref": "#/$defs/nullableTimestamp",
+                  "description": "Time the right-eye source produced or timestamped this frame; null when unavailable."
+                },
+                "stereo_output_ns": {
+                  "$ref": "#/$defs/nullableTimestamp",
+                  "description": "Time stereo alignment produced the combined stereo frame; null if the frame did not pass through that stage."
+                },
+                "overlay_output_ns": {
+                  "$ref": "#/$defs/nullableTimestamp",
+                  "description": "Time the overlay stage produced the frame; null if the frame did not pass through that stage."
+                },
+                "recorder_reception_ns": {
+                  "$ref": "#/$defs/nonnegativeInteger",
+                  "description": "CLOCK_REALTIME sampled when the frame reached the recorder timestamp probe, in nanoseconds since the Unix epoch."
+                }
               }
             },
             "monotonic": {
               "type": "object",
+              "description": "Frame observations made with CLOCK_MONOTONIC. Values are meaningful only on the recording host and within the same boot.",
               "additionalProperties": false,
               "required": ["recorder_reception_ns"],
               "properties": {
-                "recorder_reception_ns": { "$ref": "#/$defs/nonnegativeInteger" }
+                "recorder_reception_ns": {
+                  "$ref": "#/$defs/nonnegativeInteger",
+                  "description": "CLOCK_MONOTONIC sampled when the frame reached the recorder timestamp probe, in nanoseconds from an unspecified monotonic epoch."
+                }
               }
             }
           }
         },
         "derived": {
           "type": "object",
+          "description": "Canonical capture time selected from the preserved CPU realtime observations for convenient downstream correlation.",
           "additionalProperties": false,
           "required": ["preferred_capture_time_ns", "preferred_capture_time_clock", "preferred_capture_time_source"],
           "properties": {
-            "preferred_capture_time_ns": { "$ref": "#/$defs/nonnegativeInteger" },
-            "preferred_capture_time_clock": { "const": "cpu_realtime" },
+            "preferred_capture_time_ns": {
+              "$ref": "#/$defs/nonnegativeInteger",
+              "description": "Selected capture time in nanoseconds since the Unix epoch. No original observation is discarded when this value is derived."
+            },
+            "preferred_capture_time_clock": {
+              "const": "cpu_realtime",
+              "description": "Clock domain of preferred_capture_time_ns. It is always cpu_realtime in this schema version."
+            },
             "preferred_capture_time_source": {
-              "enum": ["mono_source", "left_source", "right_source", "stereo_source_midpoint", "stereo_output", "overlay_output", "recorder_reception"]
+              "enum": ["mono_source", "left_source", "right_source", "stereo_source_midpoint", "stereo_output", "overlay_output", "recorder_reception"],
+              "description": "Observation selected as preferred_capture_time_ns. stereo_source_midpoint is the overflow-safe arithmetic midpoint of left_source_ns and right_source_ns. Selection priority is overlay_output, stereo_output, mono_source, stereo_source_midpoint, left_source, right_source, then recorder_reception."
             }
           }
         }

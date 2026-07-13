@@ -2,41 +2,61 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "dvrk_data:session_tags@1.0.0",
   "title": "Session Tags Metadata",
+  "description": "Stages and point-event tags captured by record for an entire recording session. CPU timestamps use CLOCK_REALTIME nanoseconds since the Unix epoch.",
   "type": "object",
   "properties": {
     "type": {
       "type": "string",
-      "const": "dvrk_data:session_tags@1.0.0"
+      "const": "dvrk_data:session_tags@1.0.0",
+      "description": "Versioned document-type identifier for session-level tags."
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "Local civil time at which this metadata document was written, in the timestamp format emitted by dvrk_data.",
+      "examples": ["2026-07-12T20:15:30.123"]
     },
     "stages": {
       "type": "array",
+      "description": "Ordered recording intervals. Repeated stage names represent separate occurrences.",
       "items": {
         "type": "object",
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "description": "Stage label configured for the recording session."
           },
           "start": {
             "type": "object",
+            "description": "Beginning of this stage interval.",
             "properties": {
               "cpu_ts": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "description": "Stage-start CLOCK_REALTIME timestamp in nanoseconds since the Unix epoch."
               },
               "generated_at": {
-                "type": "string"
+                "type": "string",
+                "description": "Local civil time at which the stage start was recorded."
               }
-            }
+            },
+            "required": ["cpu_ts", "generated_at"]
           },
           "end": {
             "type": "object",
+            "description": "End of this stage interval.",
             "properties": {
               "cpu_ts": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "description": "Stage-end CLOCK_REALTIME timestamp in nanoseconds since the Unix epoch."
               },
               "generated_at": {
-                "type": "string"
+                "type": "string",
+                "description": "Local civil time at which the stage end was recorded."
               }
-            }
+            },
+            "required": ["cpu_ts", "generated_at"]
           }
         },
         "required": [
@@ -46,10 +66,27 @@
     },
     "tags": {
       "type": "object",
+      "description": "Point-event tags keyed by configured tag name. Each value is the ordered list of occurrences.",
       "additionalProperties": {
-        "type": "object"
+        "type": "array",
+        "items": {
+          "type": "object",
+          "description": "One occurrence of a session event tag.",
+          "properties": {
+            "cpu_ts": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Event CLOCK_REALTIME timestamp in nanoseconds since the Unix epoch."
+            },
+            "generated_at": {
+              "type": "string",
+              "description": "Local civil time at which the event tag was recorded."
+            }
+          },
+          "required": ["cpu_ts", "generated_at"]
+        }
       }
     }
   },
-  "required": ["type"]
+  "required": ["type", "generated_at", "stages", "tags"]
 }

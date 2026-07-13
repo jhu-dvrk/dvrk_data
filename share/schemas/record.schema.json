@@ -6,7 +6,8 @@
   "properties": {
     "type": {
       "type": "string",
-      "const": "dvrk_data:record@1.0.0"
+      "const": "dvrk_data:record@1.0.0",
+      "description": "Versioned document-type identifier for a dVRK recording configuration."
     },
     "configuration_files": {
       "type": "array",
@@ -60,6 +61,7 @@
     },
     "videos": {
       "type": "array",
+      "description": "Video sources to preview and optionally record. Configuration files are merged by appending their video entries in load order.",
       "items": {
         "type": "object",
         "required": [
@@ -92,6 +94,12 @@
             "type": "string",
             "enum": ["LR", "RL"],
             "description": "Indicates the video contains a side-by-side stereo pair. 'LR' means left eye is on the left half, 'RL' means right eye is on the left half. This value is stored in the sidecar JSON and used by extract -S to split the video into separate left/right channels."
+          },
+          "estimated_latency": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Estimated capture-to-display latency in seconds. The video_latency application maintains this value; record converts it to estimated_latency_ms in the video sidecar.",
+            "default": 0.0
           },
           "encoding": {
             "type": "object",

@@ -2,72 +2,114 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "dvrk_data:video_tags@1.0.0",
   "title": "Video Tags Metadata",
+  "description": "Frame-aligned stages and point-event tags for one video. Frame indices are zero-based; CPU timestamps correlate annotations with the video sidecar and session data.",
   "type": "object",
   "properties": {
     "type": {
       "type": "string",
-      "const": "dvrk_data:video_tags@1.0.0"
+      "const": "dvrk_data:video_tags@1.0.0",
+      "description": "Versioned document-type identifier for per-video tags."
     },
     "video_file": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1,
+      "description": "Base name of the video file to which these annotations apply.",
+      "examples": ["stereo.mp4"]
+    },
+    "created_at": {
+      "type": "string",
+      "description": "Local civil time when this tag document was initially constructed."
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "Local civil time when the current contents were generated or saved."
+    },
+    "session_tags_loaded": {
+      "type": "boolean",
+      "description": "True after session-level annotations have been imported, preventing accidental duplicate imports.",
+      "default": false
     },
     "stages": {
       "type": "array",
+      "description": "Annotated video intervals. Repeated names represent separate stage occurrences.",
       "items": {
         "type": "object",
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "description": "Stage label from the recording configuration or accepted during tag import."
           },
           "start": {
             "type": "object",
+            "description": "First annotated frame of the stage interval.",
             "properties": {
               "cpu_ts": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "description": "Preferred CPU realtime capture timestamp for the start frame, in nanoseconds since the Unix epoch."
               },
               "frame_relative": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "description": "Zero-based index within the frames represented by this tag document."
               },
               "frame_absolute": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "description": "Zero-based index within the specific video file. Currently equal to frame_relative unless session-offset logic is applied."
               },
               "generated_at": {
-                "type": "string"
+                "type": "string",
+                "description": "Local civil time when this stage boundary annotation was generated."
               }
-            }
+            },
+            "required": ["cpu_ts", "frame_relative", "frame_absolute", "generated_at"]
           },
           "end": {
             "type": "object",
+            "description": "Last annotated frame of the stage interval; the boundary is inclusive.",
             "properties": {
               "cpu_ts": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "description": "Preferred CPU realtime capture timestamp for the end frame, in nanoseconds since the Unix epoch."
               },
               "frame_relative": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "description": "Zero-based index within the frames represented by this tag document."
               },
               "frame_absolute": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "description": "Zero-based index within the specific video file. Currently equal to frame_relative unless session-offset logic is applied."
               },
               "generated_at": {
-                "type": "string"
+                "type": "string",
+                "description": "Local civil time when this stage boundary annotation was generated."
               }
-            }
+            },
+            "required": ["cpu_ts", "frame_relative", "frame_absolute", "generated_at"]
           }
         },
         "required": [
-          "name"
+          "name", "start", "end"
         ]
       }
     },
     "tags": {
       "type": "object",
+      "description": "Point-event tags keyed by tag name. Each array contains zero-based video-frame indices in annotation order.",
       "additionalProperties": {
         "type": "array",
         "items": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based frame index where this point-event tag occurs."
         }
       }
     }
   },
-  "required": ["type"]
+  "required": ["type", "video_file", "generated_at", "session_tags_loaded", "stages", "tags"]
 }

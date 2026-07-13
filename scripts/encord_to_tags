@@ -117,6 +117,7 @@ def convert_encord_to_tags(encord_path, sidecar_path, output_path=None):
         "type": "dvrk_data:video_tags@1.0.0",
         "video_file": os.path.basename(sidecar_path).replace('.json', '.mp4'),
         "generated_at": get_current_timestamp_iso8601(),
+        "session_tags_loaded": False,
         "stages": stages,
         "tags": {}
     }
