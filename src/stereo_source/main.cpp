@@ -243,7 +243,7 @@ int main(int argc, char *argv[]) {
   add_timestamp_probe(pipeline, "__right_src_q__", 1);
 
   const int rc = dc_stereo::run_pipeline(
-      pipeline, node, "Stereo source unixfd pipeline started");
+      pipeline, node, "stereo_source", "Stereo source unixfd pipeline started");
   gst_object_unref(pipeline);
   rclcpp::shutdown();
   return rc;

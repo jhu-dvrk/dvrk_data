@@ -77,9 +77,6 @@ struct AppData {
     bool explicit_stages;
 
     std::mutex data_mutex;
-    bool dump_dot;
-    GstDebugGraphDetails dot_flags;
-
     AppData();
     ~AppData();
 };

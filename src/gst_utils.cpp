@@ -1,60 +1,45 @@
 #include <dvrk_data/gst_utils.hpp>
-#include <iostream>
-#include <cstdlib>
-
 namespace dc {
 
-void dump_dot(GstElement* pipeline, const std::string& path, GstDebugGraphDetails flags) {
-    gchar* dot_data = gst_debug_bin_to_dot_data(GST_BIN(pipeline), flags);
-    if (dot_data) {
-        std::string dot_str(dot_data);
-        
-        // Change orientation to Top-to-Bottom (Vertical)
-        size_t pos = dot_str.find("rankdir=LR");
-        if (pos != std::string::npos) {
-            dot_str.replace(pos, 10, "rankdir=TB");
-        }
+namespace {
 
-        FILE* f = fopen(path.c_str(), "w");
-        if (f) {
-            fputs(dot_str.c_str(), f);
-            fclose(f);
-            std::cout << "GStreamer pipeline graph saved to: " << path << std::endl;
-        } else {
-            std::cerr << "Error: Could not open file for writing: " << path << std::endl;
-        }
-        g_free(dot_data);
+struct PendingDotDump {
+    GstElement *pipeline;
+    std::string file_name;
+};
+
+gboolean dump_dot_timeout(gpointer user_data) {
+    auto *pending = static_cast<PendingDotDump *>(user_data);
+    GstState state = GST_STATE_NULL;
+    gst_element_get_state(pending->pipeline, &state, nullptr, 0);
+    if (state == GST_STATE_PLAYING) {
+        dump_dot_after_negotiation(pending->pipeline, pending->file_name);
     }
+    gst_object_unref(pending->pipeline);
+    delete pending;
+    return G_SOURCE_REMOVE;
 }
 
-bool parse_dot_arguments(int& i, int argc, char* argv[], bool& dump_dot, GstDebugGraphDetails& dot_flags) {
-    std::string arg = argv[i];
-    if (arg == "-g" || arg == "--dot") {
-        dump_dot = true;
-        int level = 1; // Default to "Light" if -g is present
-        if (i + 1 < argc && isdigit(argv[i + 1][0])) {
-            level = std::stoi(argv[++i]);
-        }
-        
-        if (level == 0)
-            dot_flags = (GstDebugGraphDetails)0;
-        else if (level == 1)
-            dot_flags = GST_DEBUG_GRAPH_SHOW_STATES;
-        else if (level == 2)
-            dot_flags = (GstDebugGraphDetails)(GST_DEBUG_GRAPH_SHOW_MEDIA_TYPE | GST_DEBUG_GRAPH_SHOW_STATES);
-        else
-            dot_flags = GST_DEBUG_GRAPH_SHOW_ALL;
-            
-        return true;
+} // namespace
+
+void dump_dot_after_negotiation(GstElement *pipeline,
+                                const std::string &file_name) {
+    if (pipeline == nullptr || !GST_IS_BIN(pipeline)) {
+        return;
     }
-    return false;
+    GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(
+        GST_BIN(pipeline), GST_DEBUG_GRAPH_SHOW_ALL, file_name.c_str());
 }
 
-void print_dot_usage() {
-    std::cerr << "  -g 0: Minimal (elements only)" << std::endl;
-    std::cerr << "  -g 1: Light (elements + states, recommended)" << std::endl;
-    std::cerr << "  -g 2: Medium (adds media types)" << std::endl;
-    std::cerr << "  -g 3: Full (all parameters)" << std::endl;
+void schedule_dot_dump_after_negotiation(GstElement *pipeline,
+                                         const std::string &file_name,
+                                         guint delay_ms) {
+    if (pipeline == nullptr || !GST_IS_BIN(pipeline)) {
+        return;
+    }
+    auto *pending = new PendingDotDump{
+        GST_ELEMENT(gst_object_ref(pipeline)), file_name};
+    g_timeout_add(delay_ms, dump_dot_timeout, pending);
 }
 
 } // namespace dc

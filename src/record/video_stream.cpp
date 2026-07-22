@@ -23,7 +23,7 @@ std::string base_name(const std::string &path) {
 }
 
 VideoStream::VideoStream() : pipeline(NULL), valve(NULL), rec_overlay(NULL), preview_widget(NULL), record_checkbox(NULL), retry_button(NULL), stats_label(NULL), stream_name_label(NULL), preview_stack(NULL),
-                has_current_segment(false), is_recording(false), record_enabled(true), frames_recorded(0), frames_dropped(0), last_run_frames_recorded(0), last_run_stage_name(""), current_fps(0.0), estimated_latency(0.0),
+                has_current_segment(false), is_recording(false), record_enabled(true), dot_dumped(false), frames_recorded(0), frames_dropped(0), last_run_frames_recorded(0), last_run_stage_name(""), current_fps(0.0), estimated_latency(0.0),
                 cpu_ts_from_unixfd_count(0), cpu_ts_at_reception_count(0),
                 width(0), height(0), src_fps(0.0), last_src_ts(0), src_frame_counter(0),
                 rec_width(0), rec_height(0), rec_fps_requested(0.0),
@@ -74,6 +74,7 @@ bool VideoStream::create(AppData* ad, const dc::VideoConfig* v) {
     this->preview_widget = NULL;
     this->name = v->name;
     this->record_enabled = v->record;
+    this->dot_dumped = false;
     this->side_by_side = v->side_by_side;
     this->estimated_latency = v->estimated_latency;
     this->has_error = false;
@@ -164,13 +165,6 @@ bool VideoStream::create(AppData* ad, const dc::VideoConfig* v) {
     this->pipeline_desc = pstr;
     this->pipeline = gst_parse_launch(pstr.c_str(), NULL);
     if (!this->pipeline) return false;
-
-    std::string sn = v->name;
-    for (char &c : sn) if (c == ' ') c = '_';
-
-    if (ad->dump_dot) {
-        dc::dump_dot(this->pipeline, ad->session_dir + "/" + sn + "_pipeline.dot", ad->dot_flags);
-    }
 
     // Source probe on tee sink pad (before split to preview / record)
     GstElement *tee = gst_bin_get_by_name(GST_BIN(this->pipeline), "__rec_t__");

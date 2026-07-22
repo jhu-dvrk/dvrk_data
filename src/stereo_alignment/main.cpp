@@ -511,7 +511,8 @@ int main(int argc, char *argv[]) {
   }
 
   const int status = dc_stereo::run_pipeline(
-      pipeline, node, "Stereo alignment background pipeline started");
+      pipeline, node, "stereo_alignment",
+      "Stereo alignment background pipeline started");
   gst_object_unref(pipeline);
   rclcpp::shutdown();
   return status;

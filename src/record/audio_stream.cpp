@@ -6,7 +6,7 @@
 #include <algorithm>
 
 AudioStream::AudioStream() : pipeline(NULL), sink(NULL), valve(NULL), src(NULL),
-                is_recording(false), total_offset_ns(0), last_raw_buffer_ts(-1), last_duration(0),
+                is_recording(false), dot_dumped(false), total_offset_ns(0), last_raw_buffer_ts(-1), last_duration(0),
                 cpu_ts_from_unixfd_count(0), cpu_ts_at_reception_count(0), m_ad(NULL) {}
 
 AudioStream::~AudioStream() {
@@ -33,6 +33,7 @@ void AudioStream::shutdown() {
 
 bool AudioStream::create(AppData* ad) {
     this->m_ad = ad;
+    this->dot_dumped = false;
     std::string apstr = "pulsesrc name=asrc ! audioconvert ! audioresample ! level name=lvl ! tee name=at "
                         "at. ! queue ! fakesink sync=false async=false "
                         "at. ! queue ! valve name=av drop=true ! wavenc ! filesink name=asink sync=false async=false";
@@ -71,10 +72,6 @@ bool AudioStream::create(AppData* ad) {
     if (asink) {
         g_object_set(asink, "location", this->output_audio.c_str(), NULL);
         gst_object_unref(asink);
-    }
-
-    if (ad->dump_dot) {
-        dc::dump_dot(this->pipeline, ad->session_dir + "/audio_pipeline.dot", ad->dot_flags);
     }
 
     GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(this->pipeline));

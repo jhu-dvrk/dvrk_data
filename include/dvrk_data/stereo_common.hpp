@@ -13,6 +13,7 @@
 
 #include <dvrk_data/config.hpp>
 #include <dvrk_data/dvrk_gst_socket.hpp>
+#include <dvrk_data/gst_utils.hpp>
 
 namespace dc_stereo {
 
@@ -24,12 +25,14 @@ struct PipelineReconnector {
   guint timer_id = 0;
   bool is_active = false;
   std::string name;
+  bool dot_dumped = false;
 
   void start(GstElement *pipe, rclcpp::Node *n, const std::string &pipeline_name) {
     pipeline = pipe;
     node = n;
     name = pipeline_name;
     is_active = true;
+    dot_dumped = false;
   }
 
   void stop() {
@@ -287,6 +290,26 @@ inline gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer user_data) {
     if (err != nullptr) {
       g_error_free(err);
     }
+  } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ASYNC_DONE &&
+             GST_MESSAGE_SRC(msg) == GST_OBJECT(data->reconnector.pipeline) &&
+             !data->reconnector.dot_dumped) {
+    dc::dump_dot_after_negotiation(data->reconnector.pipeline,
+                                   data->reconnector.name + "_negotiated");
+    data->reconnector.dot_dumped = true;
+  } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_STATE_CHANGED &&
+             GST_MESSAGE_SRC(msg) == GST_OBJECT(data->reconnector.pipeline) &&
+             !data->reconnector.dot_dumped) {
+    GstState old_state = GST_STATE_NULL;
+    GstState new_state = GST_STATE_NULL;
+    GstState pending_state = GST_STATE_VOID_PENDING;
+    gst_message_parse_state_changed(msg, &old_state, &new_state,
+                                    &pending_state);
+    if (new_state == GST_STATE_PLAYING) {
+      dc::schedule_dot_dump_after_negotiation(
+          data->reconnector.pipeline,
+          data->reconnector.name + "_negotiated");
+      data->reconnector.dot_dumped = true;
+    }
   }
 
   return G_SOURCE_CONTINUE;
@@ -294,10 +317,11 @@ inline gboolean on_bus_message(GstBus *, GstMessage *msg, gpointer user_data) {
 
 inline int run_pipeline(GstElement *pipeline,
                         const std::shared_ptr<rclcpp::Node> &node,
+                        const std::string &pipeline_name,
                         const std::string &started_message) {
   PipelineUserData user_data;
   user_data.node = node.get();
-  user_data.reconnector.start(pipeline, node.get(), "stereo_pipeline");
+  user_data.reconnector.start(pipeline, node.get(), pipeline_name);
 
   GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
   gst_bus_add_watch(bus, on_bus_message, &user_data);

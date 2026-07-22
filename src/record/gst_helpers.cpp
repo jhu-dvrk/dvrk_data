@@ -4,6 +4,7 @@
 #include "audio_stream.hpp"
 #include "ui.hpp"
 
+#include <cctype>
 #include <iostream>
 #include <gst/video/video.h>
 #include <glibmm.h>
@@ -310,7 +311,61 @@ gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer user_data) {
     (void)bus;
     AppData *ad = (AppData *)user_data;
     if (ad->is_quitting && GST_MESSAGE_TYPE(msg) != GST_MESSAGE_EOS) return TRUE;
-    if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
+    if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ASYNC_DONE) {
+        GstObject *src = GST_MESSAGE_SRC(msg);
+        if (ad->audio_stream && ad->audio_stream->pipeline &&
+            src == GST_OBJECT(ad->audio_stream->pipeline) &&
+            !ad->audio_stream->dot_dumped) {
+            dc::dump_dot_after_negotiation(ad->audio_stream->pipeline,
+                                           "record_audio_negotiated");
+            ad->audio_stream->dot_dumped = true;
+        } else {
+            for (auto stream : ad->streams) {
+                if (!stream->pipeline || stream->dot_dumped ||
+                    src != GST_OBJECT(stream->pipeline)) {
+                    continue;
+                }
+                std::string file_name = "record_" + stream->name + "_negotiated";
+                std::replace_if(file_name.begin(), file_name.end(),
+                                [](unsigned char c) {
+                                    return !std::isalnum(c) && c != '_' && c != '-';
+                                }, '_');
+                dc::dump_dot_after_negotiation(stream->pipeline, file_name);
+                stream->dot_dumped = true;
+                break;
+            }
+        }
+    } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_STATE_CHANGED) {
+        GstObject *src = GST_MESSAGE_SRC(msg);
+        GstState old_state = GST_STATE_NULL;
+        GstState new_state = GST_STATE_NULL;
+        GstState pending_state = GST_STATE_VOID_PENDING;
+        gst_message_parse_state_changed(msg, &old_state, &new_state,
+                                        &pending_state);
+        if (new_state == GST_STATE_PLAYING && ad->audio_stream &&
+            ad->audio_stream->pipeline && !ad->audio_stream->dot_dumped &&
+            src == GST_OBJECT(ad->audio_stream->pipeline)) {
+            dc::schedule_dot_dump_after_negotiation(
+                ad->audio_stream->pipeline, "record_audio_negotiated");
+            ad->audio_stream->dot_dumped = true;
+        } else if (new_state == GST_STATE_PLAYING) {
+            for (auto stream : ad->streams) {
+                if (!stream->pipeline || stream->dot_dumped ||
+                    src != GST_OBJECT(stream->pipeline)) {
+                    continue;
+                }
+                std::string file_name = "record_" + stream->name + "_negotiated";
+                std::replace_if(file_name.begin(), file_name.end(),
+                                [](unsigned char c) {
+                                    return !std::isalnum(c) && c != '_' && c != '-';
+                                }, '_');
+                dc::schedule_dot_dump_after_negotiation(stream->pipeline,
+                                                        file_name);
+                stream->dot_dumped = true;
+                break;
+            }
+        }
+    } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
         GstObject *src = GST_MESSAGE_SRC(msg);
         bool is_pipeline = (ad->audio_stream && ad->audio_stream->pipeline && src == GST_OBJECT(ad->audio_stream->pipeline));
         if (!is_pipeline) {

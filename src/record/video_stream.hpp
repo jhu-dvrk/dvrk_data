@@ -45,6 +45,7 @@ public:
     GstSegment current_segment;
     bool has_current_segment;
     bool is_recording, record_enabled;
+    bool dot_dumped;
     long long frames_recorded, frames_dropped;
     long long last_run_frames_recorded;
     std::string last_run_stage_name;
