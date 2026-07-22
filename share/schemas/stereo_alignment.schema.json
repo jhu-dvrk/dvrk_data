@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dvrk_data:stereo_alignment@1.0.0",
+  "title": "dVRK stereo alignment configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "camera"],
+  "properties": {
+    "type": { "const": "dvrk_data:stereo_alignment@1.0.0" },
+    "name": { "type": "string", "minLength": 1, "default": "dvrk_display" },
+    "preserve_size": { "type": "boolean", "default": true },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "crop"],
+      "properties": {
+        "size": { "$ref": "#/$defs/size" },
+        "left": { "$ref": "#/$defs/optionalCameraStream" },
+        "right": { "$ref": "#/$defs/optionalCameraStream" },
+        "crop": { "$ref": "#/$defs/size" },
+        "alignment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "horizontal_shift_px": { "type": "integer", "default": 0 },
+            "vertical_shift_px": { "type": "integer", "default": 0 }
+          }
+        }
+      }
+    },
+    "unixfdsources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/socketEntry" },
+      "description": "Normally contains left and right sockets produced by stereo_source."
+    },
+    "unixfdsinks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/socketEntry" },
+      "description": "Aligned stereo outputs. A default stereo sink is created when none is configured."
+    }
+  },
+  "anyOf": [
+    {
+      "properties": {
+        "camera": {
+          "required": ["left", "right"],
+          "properties": {
+            "left": { "required": ["stream"] },
+            "right": { "required": ["stream"] }
+          }
+        }
+      }
+    },
+    {
+      "required": ["unixfdsources"],
+      "properties": {
+        "unixfdsources": {
+          "allOf": [
+            { "contains": { "properties": { "socket": { "pattern": "(^|:)left$" } } } },
+            { "contains": { "properties": { "socket": { "pattern": "(^|:)right$" } } } }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "color": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "brightness": { "type": "number", "default": 0.0 },
+        "contrast": { "type": "number", "default": 1.0 },
+        "saturation": { "type": "number", "default": 1.0 },
+        "hue": { "type": "number", "default": 0.0 }
+      }
+    },
+    "optionalCameraStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stream": { "type": "string", "minLength": 1 },
+        "color": { "$ref": "#/$defs/color" }
+      }
+    },
+    "socketEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["socket"],
+      "properties": {
+        "socket": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

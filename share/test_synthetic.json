@@ -13,6 +13,9 @@
     }
   ],
   "ros_topics": [
-    "/dvrk_test/correlation"
+    {
+      "name": "/dvrk_test/correlation",
+      "continuous": false
+    }
   ]
 }

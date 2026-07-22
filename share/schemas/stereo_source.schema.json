@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dvrk_data:stereo_source@1.0.0",
+  "title": "dVRK stereo source configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "camera"],
+  "properties": {
+    "type": { "const": "dvrk_data:stereo_source@1.0.0" },
+    "name": { "type": "string", "minLength": 1, "default": "dvrk_display" },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["left", "right"],
+      "properties": {
+        "size": { "$ref": "#/$defs/size" },
+        "left": { "$ref": "#/$defs/cameraStream" },
+        "right": { "$ref": "#/$defs/cameraStream" }
+      }
+    },
+    "unixfdsinks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/socketEntry" },
+      "description": "Left and right outputs. Missing left or right entries are created with their default socket names."
+    }
+  },
+  "$defs": {
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "cameraStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stream"],
+      "properties": {
+        "stream": { "type": "string", "minLength": 1 }
+      }
+    },
+    "socketEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["socket"],
+      "properties": {
+        "socket": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
