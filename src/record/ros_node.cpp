@@ -79,6 +79,7 @@ void close_bag_writer(AppData* ad) {
 
 void setup_ros_monitoring(AppData* ad) {
     if (!ad || !ad->node) return;
+    if (!ad->ros_topics.empty() && !ad->timers.empty()) return;
     
     // Timer-based check for generic topics (bags)
     auto timer_cb = [ad]() {
@@ -108,11 +109,18 @@ void setup_ros_monitoring(AppData* ad) {
                 std::string type = topic_names_and_types[topic][0];
                 // Removed print found topic
 
-                auto callback = [ad, &topic_cfg, topic, type, is_continuous](std::shared_ptr<rclcpp::SerializedMessage> msg) {
+                auto callback = [ad, topic, type, is_continuous](std::shared_ptr<rclcpp::SerializedMessage> msg) {
                     std::lock_guard<std::mutex> lock(ad->data_mutex);
+                    bool enabled = false;
+                    for (const auto& cfg : ad->ros_topics) {
+                        if (cfg.name == topic) {
+                            enabled = cfg.enabled;
+                            break;
+                        }
+                    }
                     if ((ad->global_recording || (is_continuous && ad->any_recording_started)) && 
                         ad->bag_writer &&
-                        topic_cfg.enabled) {
+                        enabled) {
                         try {
                              rosbag2_storage::TopicMetadata tm;
                              tm.name = topic;

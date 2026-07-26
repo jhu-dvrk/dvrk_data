@@ -308,7 +308,7 @@ void MainWindow::finalize_session() {
         Json::Value framesArr(Json::arrayValue);
         for (const auto &f : m_data->audio_stream->frames) {
             Json::Value frameNode;
-            frameNode["cpu_ts"] = (Json::Value::Int64)f.preferred_capture_time_ns;
+            frameNode["cpu_ts"] = (Json::Value::Int64)f.cpu_realtime_recorder_reception_ns;
             frameNode["gst_ts"] = (Json::Value::Int64)f.gst_pts_ns;
             framesArr.append(frameNode);
         }

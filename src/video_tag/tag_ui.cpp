@@ -15,6 +15,51 @@
 #include <dvrk_data/collection_config.hpp>
 #include <dvrk_data/tags.hpp>
 
+namespace {
+
+bool json_timestamp(const Json::Value& value, long long& timestamp) {
+    if (!value.isInt64() && !value.isUInt64()) {
+        return false;
+    }
+    timestamp = value.asInt64();
+    return timestamp >= 0;
+}
+
+bool explicit_annotation_timestamp_ns(const Json::Value& frame,
+                                      long long& timestamp) {
+    const Json::Value& realtime = frame["cpu"]["realtime"];
+    if (!realtime.isObject()) {
+        return false;
+    }
+
+    long long mono = 0;
+    if (json_timestamp(realtime["mono_source_ns"], mono)) {
+        timestamp = mono;
+        return true;
+    }
+
+    long long left = 0;
+    long long right = 0;
+    const bool has_left = json_timestamp(realtime["left_source_ns"], left);
+    const bool has_right = json_timestamp(realtime["right_source_ns"], right);
+    if (has_left && has_right) {
+        timestamp = left / 2 + right / 2 + (left % 2 + right % 2) / 2;
+        return true;
+    }
+    if (has_left) {
+        timestamp = left;
+        return true;
+    }
+    if (has_right) {
+        timestamp = right;
+        return true;
+    }
+
+    return json_timestamp(realtime["recorder_reception_ns"], timestamp);
+}
+
+} // namespace
+
 TagWindow::TagWindow(const std::string& video, const std::string&config, const std::string& tags_file, bool load_session_tags)
     : m_main_hbox(Gtk::ORIENTATION_HORIZONTAL, 10),
       m_left_vbox(Gtk::ORIENTATION_VERTICAL, 5),
@@ -229,10 +274,10 @@ void TagWindow::load_sidecar_json() {
         m_data.frame_gst_timestamps.clear();
 
         for (const auto& frame : root["frames"]) {
-            const Json::Value& preferred = frame["derived"]["preferred_capture_time_ns"];
             const Json::Value& pts = frame["gst"]["pts_ns"];
-            if (!preferred.isInt64() && !preferred.isUInt64()) {
-                std::cerr << "Invalid preferred capture timestamp in " << json_file << std::endl;
+            long long cpu_ts = 0;
+            if (!explicit_annotation_timestamp_ns(frame, cpu_ts)) {
+                std::cerr << "Missing explicit annotation timestamp in " << json_file << std::endl;
                 m_data.frame_cpu_timestamps.clear();
                 m_data.frame_gst_timestamps.clear();
                 return;
@@ -243,7 +288,7 @@ void TagWindow::load_sidecar_json() {
                 m_data.frame_gst_timestamps.clear();
                 return;
             }
-            m_data.frame_cpu_timestamps.push_back(preferred.asInt64());
+            m_data.frame_cpu_timestamps.push_back(cpu_ts);
             const long long t = pts.asInt64();
 
             // DO NOT SUBTRACT first_gst_ts. 

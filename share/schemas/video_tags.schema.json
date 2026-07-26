@@ -47,7 +47,7 @@
               "cpu_ts": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Preferred CPU realtime capture timestamp for the start frame, in nanoseconds since the Unix epoch."
+                "description": "Explicit CPU realtime timestamp selected from the annotated frame's source capture observations, or recorder reception when no source timestamp exists, in nanoseconds since the Unix epoch."
               },
               "frame_relative": {
                 "type": "integer",
@@ -73,7 +73,7 @@
               "cpu_ts": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Preferred CPU realtime capture timestamp for the end frame, in nanoseconds since the Unix epoch."
+                "description": "Explicit CPU realtime timestamp selected from the annotated frame's source capture observations, or recorder reception when no source timestamp exists, in nanoseconds since the Unix epoch."
               },
               "frame_relative": {
                 "type": "integer",

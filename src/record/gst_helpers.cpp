@@ -184,7 +184,6 @@ GstPadProbeReturn audio_timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, g
         clock_gettime(CLOCK_REALTIME, &ts);
         long long cpu_ts = (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
         FrameData frame;
-        frame.preferred_capture_time_ns = cpu_ts;
         frame.cpu_realtime_recorder_reception_ns = cpu_ts;
         frame.gst_pts_ns = buffer_ts_ns;
         as->frames.push_back(frame);
@@ -237,30 +236,6 @@ GstPadProbeReturn timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointe
             (long long)realtime_ts.tv_sec * 1000000000LL + realtime_ts.tv_nsec;
         const long long reception_monotonic_ns =
             (long long)monotonic_ts.tv_sec * 1000000000LL + monotonic_ts.tv_nsec;
-        long long cpu_ts;
-        if (frame_timestamps.overlay_output_ts != 0) {
-            cpu_ts = static_cast<long long>(frame_timestamps.overlay_output_ts);
-        } else if (frame_timestamps.stereo_output_ts != 0) {
-            cpu_ts = static_cast<long long>(frame_timestamps.stereo_output_ts);
-        } else if (frame_timestamps.mono_source_ts != 0) {
-            cpu_ts = static_cast<long long>(frame_timestamps.mono_source_ts);
-        } else if (frame_timestamps.left_source_ts != 0 &&
-                   frame_timestamps.right_source_ts != 0) {
-            cpu_ts = static_cast<long long>(
-                frame_timestamps.left_source_ts / 2 +
-                frame_timestamps.right_source_ts / 2 +
-                (frame_timestamps.left_source_ts % 2 +
-                 frame_timestamps.right_source_ts % 2) /
-                    2);
-        } else if (frame_timestamps.left_source_ts != 0) {
-            cpu_ts = static_cast<long long>(frame_timestamps.left_source_ts);
-        } else if (frame_timestamps.right_source_ts != 0) {
-            cpu_ts = static_cast<long long>(frame_timestamps.right_source_ts);
-        } else {
-            // Fallback: capture locally (for non-unixfd sources)
-            cpu_ts = reception_realtime_ns;
-        }
-
         if (has_remote_timestamps) {
             s->cpu_ts_from_unixfd_count++;
         } else {
@@ -268,7 +243,6 @@ GstPadProbeReturn timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointe
         }
 
         FrameData frame;
-        frame.preferred_capture_time_ns = cpu_ts;
         frame.cpu_realtime_recorder_reception_ns = reception_realtime_ns;
         frame.cpu_monotonic_recorder_reception_ns = reception_monotonic_ns;
         frame.cpu_realtime_mono_source_ns = frame_timestamps.mono_source_ts;

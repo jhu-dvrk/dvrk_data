@@ -2,7 +2,6 @@
 #define COMMON_TYPES_HPP
 
 struct FrameData {
-    long long preferred_capture_time_ns = 0;
     long long cpu_realtime_recorder_reception_ns = 0;
     long long cpu_monotonic_recorder_reception_ns = 0;
     long long cpu_realtime_mono_source_ns = 0;

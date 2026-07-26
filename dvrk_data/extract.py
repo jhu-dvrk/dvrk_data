@@ -23,6 +23,35 @@ def parse_stage_timestamp(value):
         return None, None
     return value.get("cpu_ts"), value.get("frame_relative")
 
+def _valid_timestamp(value):
+    return isinstance(value, int) and value >= 0
+
+def explicit_annotation_timestamp_ns(frame):
+    """Return an explicit CPU realtime timestamp for annotation/extraction."""
+    realtime = frame.get("cpu", {}).get("realtime", {})
+    if not isinstance(realtime, dict):
+        return None
+
+    mono = realtime.get("mono_source_ns")
+    if _valid_timestamp(mono):
+        return mono
+
+    left = realtime.get("left_source_ns")
+    right = realtime.get("right_source_ns")
+    has_left = _valid_timestamp(left)
+    has_right = _valid_timestamp(right)
+    if has_left and has_right:
+        return left // 2 + right // 2 + ((left % 2) + (right % 2)) // 2
+    if has_left:
+        return left
+    if has_right:
+        return right
+
+    recorder = realtime.get("recorder_reception_ns")
+    if _valid_timestamp(recorder):
+        return recorder
+    return None
+
 def flatten_dict(d, parent_key='', sep='.'):
     items = []
     if isinstance(d, (dict,)) or (hasattr(d, 'items') and callable(getattr(d, 'items'))):
@@ -43,9 +72,6 @@ def natural_sort_key(s):
     """
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split('([0-123456789]+)', str(s))]
-
-def extract_video_chunk(args_tuple):
-    video_path, output_dir, timestamps, start_frame_idx, output_format, video_basename, is_ns, is_ms, side_by_side = args_tuple
 
 def detect_rosbag_format(bag_path):
     if os.path.isdir(bag_path):
@@ -146,19 +172,28 @@ def rosbag_to_csv(bag_path, output_dir, start_ns=None, end_ns=None):
     print("Finished CSV conversion.")
 
 def process_video_chunk(args):
-    video_path, output_dir, timestamps, start_frame_idx, output_format, video_basename, is_ns, is_ms, side_by_side = args
+    video_path, output_dir, timestamps, frame_indices, output_format, video_basename, is_ns, is_ms, side_by_side = args
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened(): return 0
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     half_width = width // 2
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
     saved_count = 0
-    for i, ts in enumerate(timestamps):
+    current_pos = None
+    for ts, frame_idx in zip(timestamps, frame_indices):
+        if current_pos is None or frame_idx < current_pos or frame_idx - current_pos > 500:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            current_pos = frame_idx
+        while current_pos < frame_idx:
+            if not cap.grab():
+                break
+            current_pos += 1
+        if current_pos != frame_idx:
+            break
         ret, frame = cap.read()
         if not ret: break
+        current_pos += 1
         
         if is_ns: ts_str = f"{int(ts) / 1e9:.9f}"
         elif is_ms: ts_str = f"{float(ts) / 1000.0:.6f}"
@@ -339,37 +374,31 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
 
     if not video_path: return
 
-    latency_ns = int(data.get("estimated_latency_ms", 0.0) * 1e6)
-
     frames = data.get("frames")
     if not isinstance(frames, list) or not frames:
         print(f"CRITICAL: Sidecar {json_path} is missing current frames[] data")
         return
 
-    missing = [i for i, f in enumerate(frames)
-               if not isinstance(f.get("derived"), dict)
+    timestamps = [explicit_annotation_timestamp_ns(f) for f in frames]
+    missing = [i for i, (f, ts) in enumerate(zip(frames, timestamps))
+               if ts is None
                or not isinstance(f.get("gst"), dict)
-               or "preferred_capture_time_ns" not in f["derived"]
                or f["gst"].get("pts_ns") is None]
     if missing:
-        print(f"CRITICAL: Sidecar {json_path} has frames without preferred capture time/GStreamer PTS")
+        print(f"CRITICAL: Sidecar {json_path} has frames without explicit annotation time/GStreamer PTS")
         return
 
-    timestamps = [f["derived"]["preferred_capture_time_ns"] for f in frames]
-    gst_timestamps = [f["gst"]["pts_ns"] for f in frames]
     is_ns = True
     is_ms = False
 
     indices = []
     for i, ts in enumerate(timestamps):
-        acq_ts = ts - latency_ns
-        if (start_acq is None or acq_ts >= start_acq) and (end_acq is None or acq_ts <= end_acq):
+        if (start_acq is None or ts >= start_acq) and (end_acq is None or ts <= end_acq):
             indices.append(i)
     
     if not indices: return
     
-    video_fps = data.get("fps") or 30.0
-    video_indices = [round(gst_timestamps[i] * video_fps / 1e9) for i in indices]
+    video_indices = [int(frames[i].get("frame_index", i)) for i in indices]
     
     start_idx = video_indices[0]
     end_idx = video_indices[-1]
@@ -392,7 +421,7 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
                 s = i * chunk_size
                 e = min((i + 1) * chunk_size, len(video_indices))
                 if s >= len(video_indices): break
-                tasks.append((video_path, output_dir, [filtered_timestamps[k] for k in range(s, e)], video_indices[s], fmt, video_basename, is_ns, is_ms, side_by_side))
+                tasks.append((video_path, output_dir, [filtered_timestamps[k] for k in range(s, e)], video_indices[s:e], fmt, video_basename, is_ns, is_ms, side_by_side))
             
             if num_jobs > 1:
                 with multiprocessing.Pool(processes=num_jobs) as pool: pool.map(process_video_chunk, tasks)
@@ -480,7 +509,6 @@ def main():
              sys.exit(1)
 
         source_v_name = tags_data.get("video_file")
-        source_v_latency = 0.0
         source_v_ts = []
         if source_v_name:
             for v in videos:
@@ -490,12 +518,9 @@ def main():
                     if os.path.exists(v_json):
                         with open(v_json, 'r') as vf:
                             v_data = json.load(vf)
-                            source_v_latency = v_data.get("estimated_latency_ms", 0.0) / 1000.0
                             frames = v_data.get("frames", [])
-                            source_v_ts = [f["derived"]["preferred_capture_time_ns"]
-                                           for f in frames
-                                           if isinstance(f.get("derived"), dict)
-                                           and "preferred_capture_time_ns" in f["derived"]]
+                            source_v_ts = [explicit_annotation_timestamp_ns(f)
+                                           for f in frames]
                     break
 
         stage_counts = {}
@@ -514,13 +539,11 @@ def main():
                 if f is not None and source_v_ts:
                     if 0 <= f < len(source_v_ts):
                         final_val = source_v_ts[f]
-                        # If the value is in seconds (float), convert to ns
-                        if isinstance(final_val, float):
-                             final_val = int(final_val * 1e9)
-                        return final_val - int(source_v_latency * 1e9)
+                        if final_val is not None:
+                            return int(final_val)
                 
                 if ts is not None:
-                    return int(ts) - int(source_v_latency * 1e9)
+                    return int(ts)
 
                 return None
 

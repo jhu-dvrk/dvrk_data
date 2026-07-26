@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "dvrk_data:video_sidecar@1.0.0",
   "title": "dVRK Video Sidecar Metadata",
-  "description": "Metadata written next to one recorded video file. It preserves every timestamp observed for each recorded frame, identifies each clock domain and records the derived capture time used by downstream dVRK tools.",
+  "description": "Metadata written next to one recorded video file. It preserves explicit timestamps observed for each recorded frame and identifies each clock domain.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -30,15 +30,15 @@
     },
     "start_cpu_realtime_ns": {
       "$ref": "#/$defs/nonnegativeInteger",
-      "description": "Preferred capture time of the first recorded frame, in nanoseconds since the Unix epoch (CLOCK_REALTIME)."
+      "description": "Recorder reception time of the first recorded frame, in nanoseconds since the Unix epoch (CLOCK_REALTIME)."
     },
     "end_cpu_realtime_ns": {
       "$ref": "#/$defs/nonnegativeInteger",
-      "description": "Preferred capture time of the last recorded frame, in nanoseconds since the Unix epoch (CLOCK_REALTIME)."
+      "description": "Recorder reception time of the last recorded frame, in nanoseconds since the Unix epoch (CLOCK_REALTIME)."
     },
     "timestamp_statistics": {
       "type": "object",
-      "description": "Counts describing whether each preferred CPU timestamp came from transported frame metadata or was sampled by the recorder.",
+      "description": "Counts describing whether recorded frames carried timestamp metadata transported through unixfd or only local recorder reception timestamps.",
       "additionalProperties": false,
       "required": ["from_unixfd", "at_reception"],
       "properties": {
@@ -48,7 +48,7 @@
         },
         "at_reception": {
           "$ref": "#/$defs/nonnegativeInteger",
-          "description": "Number of recorded frames for which the preferred capture time fell back to recorder reception time."
+          "description": "Number of recorded frames without transported timestamp metadata, for which only recorder reception time was available."
         }
       }
     },
@@ -137,9 +137,9 @@
     },
     "frame": {
       "type": "object",
-      "description": "All timestamps and derived timing metadata associated with one recorded video frame.",
+      "description": "All explicit timestamps associated with one recorded video frame.",
       "additionalProperties": false,
-      "required": ["frame_index", "gst", "cpu", "derived"],
+      "required": ["frame_index", "gst", "cpu"],
       "properties": {
         "frame_index": {
           "$ref": "#/$defs/nonnegativeInteger",
@@ -226,26 +226,6 @@
                   "description": "CLOCK_MONOTONIC sampled when the frame reached the recorder timestamp probe, in nanoseconds from an unspecified monotonic epoch."
                 }
               }
-            }
-          }
-        },
-        "derived": {
-          "type": "object",
-          "description": "Canonical capture time selected from the preserved CPU realtime observations for convenient downstream correlation.",
-          "additionalProperties": false,
-          "required": ["preferred_capture_time_ns", "preferred_capture_time_clock", "preferred_capture_time_source"],
-          "properties": {
-            "preferred_capture_time_ns": {
-              "$ref": "#/$defs/nonnegativeInteger",
-              "description": "Selected capture time in nanoseconds since the Unix epoch. No original observation is discarded when this value is derived."
-            },
-            "preferred_capture_time_clock": {
-              "const": "cpu_realtime",
-              "description": "Clock domain of preferred_capture_time_ns. It is always cpu_realtime in this schema version."
-            },
-            "preferred_capture_time_source": {
-              "enum": ["mono_source", "left_source", "right_source", "stereo_source_midpoint", "stereo_output", "overlay_output", "recorder_reception"],
-              "description": "Observation selected as preferred_capture_time_ns. stereo_source_midpoint is the overflow-safe arithmetic midpoint of left_source_ns and right_source_ns. Selection priority is overlay_output, stereo_output, mono_source, stereo_source_midpoint, left_source, right_source, then recorder_reception."
             }
           }
         }

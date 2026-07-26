@@ -11,6 +11,31 @@ except ImportError:
         if dt is None: dt = datetime.now()
         return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
 
+def explicit_annotation_timestamp_ns(frame):
+    realtime = frame.get('cpu', {}).get('realtime', {})
+    if not isinstance(realtime, dict):
+        return None
+
+    mono = realtime.get('mono_source_ns')
+    if isinstance(mono, int) and mono >= 0:
+        return mono
+
+    left = realtime.get('left_source_ns')
+    right = realtime.get('right_source_ns')
+    has_left = isinstance(left, int) and left >= 0
+    has_right = isinstance(right, int) and right >= 0
+    if has_left and has_right:
+        return left // 2 + right // 2 + ((left % 2) + (right % 2)) // 2
+    if has_left:
+        return left
+    if has_right:
+        return right
+
+    recorder = realtime.get('recorder_reception_ns')
+    if isinstance(recorder, int) and recorder >= 0:
+        return recorder
+    return None
+
 def convert_encord_to_tags(encord_path, sidecar_path, output_path=None):
     print(f"Loading Encord file: {encord_path}")
     with open(encord_path, 'r') as f:
@@ -93,8 +118,11 @@ def convert_encord_to_tags(encord_path, sidecar_path, output_path=None):
                 print(f"Warning: Range [{start_frame}, {end_frame}] is out of bounds for sidecar with {num_frames} frames.")
                 continue
 
-            start_ts = frames[start_frame]['derived']['preferred_capture_time_ns']
-            end_ts = frames[end_frame]['derived']['preferred_capture_time_ns']
+            start_ts = explicit_annotation_timestamp_ns(frames[start_frame])
+            end_ts = explicit_annotation_timestamp_ns(frames[end_frame])
+            if start_ts is None or end_ts is None:
+                print(f"Warning: Range [{start_frame}, {end_frame}] lacks explicit timestamps in sidecar.")
+                continue
             
             stage_entry = {
                 "name": name,

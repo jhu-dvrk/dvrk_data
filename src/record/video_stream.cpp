@@ -20,6 +20,26 @@ std::string base_name(const std::string &path) {
     }
     return path.substr(pos + 1);
 }
+
+long long explicit_frame_time_ns(const FrameData &frame) {
+    if (frame.cpu_realtime_mono_source_ns != 0) {
+        return frame.cpu_realtime_mono_source_ns;
+    }
+    if (frame.cpu_realtime_left_source_ns != 0 &&
+        frame.cpu_realtime_right_source_ns != 0) {
+        return frame.cpu_realtime_left_source_ns / 2 +
+               frame.cpu_realtime_right_source_ns / 2 +
+               (frame.cpu_realtime_left_source_ns % 2 +
+                frame.cpu_realtime_right_source_ns % 2) / 2;
+    }
+    if (frame.cpu_realtime_left_source_ns != 0) {
+        return frame.cpu_realtime_left_source_ns;
+    }
+    if (frame.cpu_realtime_right_source_ns != 0) {
+        return frame.cpu_realtime_right_source_ns;
+    }
+    return frame.cpu_realtime_recorder_reception_ns;
+}
 }
 
 VideoStream::VideoStream() : pipeline(NULL), valve(NULL), rec_overlay(NULL), preview_widget(NULL), record_checkbox(NULL), retry_button(NULL), stats_label(NULL), stream_name_label(NULL), preview_stack(NULL),
@@ -65,12 +85,15 @@ void VideoStream::shutdown() {
 }
 
 bool VideoStream::create(AppData* ad, const dc::VideoConfig* v) {
+    if (!v) {
+        std::cerr << "Error: VideoStream::create called without a video configuration" << std::endl;
+        return false;
+    }
+
     this->m_ad = ad;
     const bool first_create = !this->m_has_config;
-    if (v) {
-        this->m_config = *v;
-        this->m_has_config = true;
-    }
+    this->m_config = *v;
+    this->m_has_config = true;
     this->preview_widget = NULL;
     this->name = v->name;
     this->record_enabled = v->record;
@@ -305,14 +328,14 @@ void VideoStream::stop_and_save(const std::vector<std::string>& config_files) {
         root["type"] = "dvrk_data:video_sidecar@1.0.0";
         root["video_file"] = base_name(this->output_video);
         root["stream_name"] = this->name;
-        root["start_cpu_realtime_ns"] = (Json::Value::Int64)this->frames.front().preferred_capture_time_ns;
-        root["end_cpu_realtime_ns"] = (Json::Value::Int64)this->frames.back().preferred_capture_time_ns;
+        root["start_cpu_realtime_ns"] = (Json::Value::Int64)this->frames.front().cpu_realtime_recorder_reception_ns;
+        root["end_cpu_realtime_ns"] = (Json::Value::Int64)this->frames.back().cpu_realtime_recorder_reception_ns;
 
         Json::Value cpuTsObj(Json::objectValue);
         cpuTsObj["from_unixfd"] = (Json::Value::Int64)this->cpu_ts_from_unixfd_count;
         cpuTsObj["at_reception"] = (Json::Value::Int64)this->cpu_ts_at_reception_count;
         root["timestamp_statistics"] = cpuTsObj;
-        root["frames_recorded"] = (int)this->frames_recorded;
+        root["frames_recorded"] = (Json::Value::UInt64)this->frames.size();
         root["frames_dropped"] = (int)this->frames_dropped;
         root["side_by_side"] = this->side_by_side;
         root["estimated_latency_ms"] = this->estimated_latency * 1000.0;
@@ -369,24 +392,6 @@ void VideoStream::stop_and_save(const std::vector<std::string>& config_files) {
             fv["cpu"]["realtime"] = realtime;
             fv["cpu"]["monotonic"]["recorder_reception_ns"] =
                 (Json::Value::Int64)f.cpu_monotonic_recorder_reception_ns;
-            fv["derived"]["preferred_capture_time_ns"] =
-                (Json::Value::Int64)f.preferred_capture_time_ns;
-            fv["derived"]["preferred_capture_time_clock"] = "cpu_realtime";
-            const char *preferred_source = "recorder_reception";
-            if (f.cpu_realtime_overlay_output_ns != 0)
-                preferred_source = "overlay_output";
-            else if (f.cpu_realtime_stereo_output_ns != 0)
-                preferred_source = "stereo_output";
-            else if (f.cpu_realtime_mono_source_ns != 0)
-                preferred_source = "mono_source";
-            else if (f.cpu_realtime_left_source_ns != 0 &&
-                     f.cpu_realtime_right_source_ns != 0)
-                preferred_source = "stereo_source_midpoint";
-            else if (f.cpu_realtime_left_source_ns != 0)
-                preferred_source = "left_source";
-            else if (f.cpu_realtime_right_source_ns != 0)
-                preferred_source = "right_source";
-            fv["derived"]["preferred_capture_time_source"] = preferred_source;
             frame_list.append(fv);
         }
         root["frames"] = frame_list;
@@ -435,8 +440,8 @@ double VideoStream::compute_segment_duration_seconds() const {
 
     long long accum_ns = 0;
     for (size_t i = 0; i + 1 < this->frames.size(); ++i) {
-        const long long diff = this->frames[i + 1].preferred_capture_time_ns -
-                               this->frames[i].preferred_capture_time_ns;
+        const long long diff = explicit_frame_time_ns(this->frames[i + 1]) -
+                               explicit_frame_time_ns(this->frames[i]);
         if (diff > 0 && diff < 500 * 1000000LL) {
             accum_ns += diff;
         }
