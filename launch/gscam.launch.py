@@ -5,21 +5,25 @@ Intended to be called via the ``gscam_socket`` helper script, which handles
 socket discovery and validation before delegating here.  Can also be invoked
 directly if the fully-qualified socket name is already known:
 
+  ros2 launch dvrk_data gscam.launch.py
   ros2 launch dvrk_data gscam.launch.py socket:=@dvrk_gst:stereo_source:left
 
 Arguments
 ---------
-socket      Required.  Fully-qualified abstract socket name, e.g.
-            ``@dvrk_gst:stereo_source:left``.
+socket      Optional.  Fully-qualified abstract socket name, e.g.
+            ``@dvrk_gst:stereo_source:left``.  If omitted, active sockets
+            are listed and no gscam node is launched.
 namespace   ROS namespace for the gscam node (default: <role>/<name>).
 frame_id    TF frame id stamped on published images (default: <role>_<name>_frame).
 camera_name camera_name in CameraInfo (default: <role>_<name>).
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+from dvrk_data import dvrk_gst_socket
 
 
 _PREFIX = "@dvrk_gst:"
@@ -42,6 +46,19 @@ def _parse_socket(fqn: str):
 
 def _launch_gscam(context, *args, **kwargs):
     fqn = LaunchConfiguration("socket").perform(context)
+    if not fqn:
+        sockets = dvrk_gst_socket.list_sockets()
+        if not sockets:
+            return [LogInfo(msg="No @dvrk_gst abstract sockets are currently active.")]
+        lines = ["Available @dvrk_gst sockets:"]
+        lines.extend(f"  {socket}" for socket in sockets)
+        lines.append("")
+        lines.append("Launch one with:")
+        lines.append(
+            f"  ros2 launch dvrk_data gscam.launch.py socket:={sockets[0]}"
+        )
+        return [LogInfo(msg="\n".join(lines))]
+
     role, name = _parse_socket(fqn)
 
     def _resolve(cfg_key: str, derived: str) -> str:
@@ -81,10 +98,11 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "socket",
+            default_value="",
             description=(
-                "Fully-qualified @dvrk_gst abstract socket name, "
+                "Optional fully-qualified @dvrk_gst abstract socket name, "
                 "e.g. '@dvrk_gst:stereo_source:left'.  "
-                "Use the gscam_socket script for discovery and validation."
+                "If omitted, list active sockets and exit."
             ),
         ),
         DeclareLaunchArgument(
