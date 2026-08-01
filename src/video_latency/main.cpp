@@ -16,6 +16,7 @@
 #include <filesystem>
 
 #include <dvrk_data/collection_config.hpp>
+#include <dvrk_data/dvrk_gst_socket.hpp>
 
 class LatencyWindow : public Gtk::Window {
 public:
@@ -285,9 +286,10 @@ protected:
     }
 
     void load_pipeline() {
-        std::string stream = m_video_config.stream;
+        std::string stream = dvrk_gst::build_input(
+            m_video_config.gst_input, dvrk_gst::ROLE_STEREO_DISPLAY);
 
-        // Note: No caps filter based on encoding settings here because source settings are now in the stream field.
+        // Note: No caps filter based on encoding settings here because source settings are in gst_input.
         // We ensure raw format for our probe using videoconvert.
         std::string pstr = stream + " ! videoconvert ! video/x-raw ! identity name=probe_identity ! videoconvert ! gtksink name=sink";
         std::cout << "Launching: " << pstr << std::endl;

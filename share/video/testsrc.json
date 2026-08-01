@@ -3,7 +3,7 @@
   "videos": [
     {
       "name": "bars",
-      "stream": "videotestsrc"
+      "gst_input": "videotestsrc"
     }
   ]
 }

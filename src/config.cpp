@@ -52,6 +52,16 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         return color;
     };
 
+    auto parse_endpoint = [](const Json::Value& node) {
+        SourceConfig endpoint;
+        if (!node.isObject()) return endpoint;
+        if (node.isMember("gst_input") && node["gst_input"].isString())
+            endpoint.gst_input = node["gst_input"].asString();
+        if (node.isMember("gst_output") && node["gst_output"].isString())
+            endpoint.gst_output = node["gst_output"].asString();
+        return endpoint;
+    };
+
     // ── Root-level fields ──────────────────────────────────────────────────────
     cfg.name = root.get("name", "dvrk_display").asString();
     if (cfg.name.empty()) cfg.name = "dvrk_display";
@@ -79,45 +89,18 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         }
     }
 
-    if (root.isMember("unixfdsinks") && root["unixfdsinks"].isArray()) {
-        for (const auto& item : root["unixfdsinks"]) {
-            if (!item.isMember("socket")) continue;
-            UnixfdSinkConfig sc;
-            sc.socket = item["socket"].asString();
-            cfg.unixfd_sinks.push_back(sc);
-        }
-    }
-
-    if (root.isMember("unixfdsources") && root["unixfdsources"].isArray()) {
-        for (const auto& item : root["unixfdsources"]) {
-            if (!item.isMember("socket")) continue;
-            UnixfdSourceConfig sc;
-            sc.socket = item["socket"].asString();
-            cfg.unixfd_sources.push_back(sc);
-        }
-    }
-
     const Json::Value empty_object(Json::objectValue);
     const Json::Value& cam =
         (root.isMember("camera") && root["camera"].isObject()) ? root["camera"] : empty_object;
 
-    if (root.isMember("stereo") && root["stereo"].isObject()) {
-        const Json::Value& stereo = root["stereo"];
-        if (stereo.isMember("socket") && stereo["socket"].isString()) {
-            cfg.stereo.socket = stereo["socket"].asString();
-        } else if (stereo.isMember("stream") && stereo["stream"].isString()) {
-            cfg.stereo.source = stereo["stream"].asString();
-        }
-
-        if (stereo.isMember("eye_size") && stereo["eye_size"].isObject()) {
-            const Json::Value& sz = stereo["eye_size"];
-            if (sz.isMember("width")) cfg.original_width = sz["width"].asInt();
-            if (sz.isMember("height")) cfg.original_height = sz["height"].asInt();
-        } else if (stereo.isMember("size") && stereo["size"].isObject()) {
-            const Json::Value& sz = stereo["size"];
-            if (sz.isMember("width")) cfg.original_width = sz["width"].asInt() / 2;
-            if (sz.isMember("height")) cfg.original_height = sz["height"].asInt();
-        }
+    if (root.isMember("gst_input") && root["gst_input"].isString())
+        cfg.stereo.gst_input = root["gst_input"].asString();
+    if (root.isMember("gst_output") && root["gst_output"].isString())
+        cfg.stereo.gst_output = root["gst_output"].asString();
+    if (root.isMember("eye_size") && root["eye_size"].isObject()) {
+        const Json::Value& sz = root["eye_size"];
+        if (sz.isMember("width")) cfg.original_width = sz["width"].asInt();
+        if (sz.isMember("height")) cfg.original_height = sz["height"].asInt();
     }
 
     if (cam.isMember("size") && cam["size"].isObject()) {
@@ -130,14 +113,14 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
 
     if (cam.isMember("left") && cam["left"].isObject()) {
         const Json::Value& lft = cam["left"];
-        if (lft.isMember("stream")) cfg.left.source = lft["stream"].asString();
+        cfg.left = parse_endpoint(lft);
         if (lft.isMember("color") && lft["color"].isObject())
             cfg.left_color = parse_color(lft["color"]);
     }
 
     if (cam.isMember("right") && cam["right"].isObject()) {
         const Json::Value& rgt = cam["right"];
-        if (rgt.isMember("stream")) cfg.right.source = rgt["stream"].asString();
+        cfg.right = parse_endpoint(rgt);
         if (rgt.isMember("color") && rgt["color"].isObject())
             cfg.right_color = parse_color(rgt["color"]);
     }
@@ -163,13 +146,13 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         cfg.crop_height = cfg.original_height;
     }
 
-    if (root.isMember("extra_streams") && root["extra_streams"].isObject()) {
-        const Json::Value& es = root["extra_streams"];
+    if (root.isMember("pip_gst_inputs") && root["pip_gst_inputs"].isObject()) {
+        const Json::Value& es = root["pip_gst_inputs"];
         if (es.isMember("monos") && es["monos"].isArray()) {
             for (const auto& item : es["monos"]) {
-                if (!item.isString()) continue;
-                if (!item.asString().empty()) {
-                    cfg.extra_streams.monos.push_back(item.asString());
+                if (item.isObject() && item["gst_input"].isString() &&
+                    !item["gst_input"].asString().empty()) {
+                    cfg.pip_gst_inputs.monos.push_back(item["gst_input"].asString());
                 }
             }
         }
@@ -177,45 +160,43 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         if (es.isMember("stereos") && es["stereos"].isArray()) {
             for (const auto& item : es["stereos"]) {
                 if (!item.isObject()) continue;
-                if (item.isMember("left") && item.isMember("right") && 
-                    item["left"].isString() && item["right"].isString()) {
+                if (item.isMember("left") && item.isMember("right") &&
+                    item["left"].isObject() && item["right"].isObject() &&
+                    item["left"]["gst_input"].isString() &&
+                    item["right"]["gst_input"].isString()) {
                     StereoExtraStream ses;
-                    ses.left = item["left"].asString();
-                    ses.right = item["right"].asString();
+                    ses.left = item["left"]["gst_input"].asString();
+                    ses.right = item["right"]["gst_input"].asString();
                     if (!ses.left.empty() && !ses.right.empty()) {
-                        cfg.extra_streams.stereos.push_back(ses);
+                        cfg.pip_gst_inputs.stereos.push_back(ses);
                     }
                 }
             }
         }
 
         // Enforce maximum of 2 total streams (monos + stereos)
-        int total_streams = cfg.extra_streams.monos.size() + cfg.extra_streams.stereos.size();
+        int total_streams = cfg.pip_gst_inputs.monos.size() + cfg.pip_gst_inputs.stereos.size();
         if (total_streams > 2) {
-            std::cerr << "Warning: Maximum of 2 extra streams allowed. Truncating." << std::endl;
-            while (cfg.extra_streams.monos.size() + cfg.extra_streams.stereos.size() > 2) {
-                if (!cfg.extra_streams.stereos.empty()) {
-                    cfg.extra_streams.stereos.pop_back();
+            std::cerr << "Warning: Maximum of 2 pip_gst_inputs entries allowed. Truncating." << std::endl;
+            while (cfg.pip_gst_inputs.monos.size() + cfg.pip_gst_inputs.stereos.size() > 2) {
+                if (!cfg.pip_gst_inputs.stereos.empty()) {
+                    cfg.pip_gst_inputs.stereos.pop_back();
                 } else {
-                    cfg.extra_streams.monos.pop_back();
+                    cfg.pip_gst_inputs.monos.pop_back();
                 }
             }
         }
         if (es.isMember("scale")) {
             const double s = es["scale"].asDouble();
-            cfg.extra_streams.scale = std::max(0.01, std::min(0.99, s));
+            cfg.pip_gst_inputs.scale = std::max(0.01, std::min(0.99, s));
         }
     }
 
     if (root.isMember("ar") && root["ar"].isObject()) {
         const Json::Value& ar = root["ar"];
         cfg.ar.enabled = ar.get("enabled", true).asBool();
-        if (ar.isMember("left") && ar["left"].isString()) {
-            cfg.ar.left = ar["left"].asString();
-        }
-        if (ar.isMember("right") && ar["right"].isString()) {
-            cfg.ar.right = ar["right"].asString();
-        }
+        if (ar.isMember("left")) cfg.ar.left = parse_endpoint(ar["left"]);
+        if (ar.isMember("right")) cfg.ar.right = parse_endpoint(ar["right"]);
         if (ar.isMember("color_key") && ar["color_key"].isArray() && ar["color_key"].size() == 3) {
             cfg.ar.use_color_key = true;
             cfg.ar.color_key_r = ar["color_key"][0].asInt();

@@ -14,14 +14,9 @@
       "required": ["left", "right"],
       "properties": {
         "size": { "$ref": "#/$defs/size" },
-        "left": { "$ref": "#/$defs/cameraStream" },
-        "right": { "$ref": "#/$defs/cameraStream" }
+        "left": { "$ref": "#/$defs/sourceEndpoint" },
+        "right": { "$ref": "#/$defs/sourceEndpoint" }
       }
-    },
-    "unixfdsinks": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/socketEntry" },
-      "description": "Left and right outputs. Missing left or right entries are created with their default socket names."
     }
   },
   "$defs": {
@@ -34,21 +29,24 @@
         "height": { "type": "integer", "minimum": 1 }
       }
     },
-    "cameraStream": {
+    "sourceEndpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stream"],
+      "required": ["gst_input"],
       "properties": {
-        "stream": { "type": "string", "minLength": 1 }
+        "gst_input": { "$ref": "#/$defs/gstInput" },
+        "gst_output": { "$ref": "#/$defs/gstOutput" }
       }
     },
-    "socketEntry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["socket"],
-      "properties": {
-        "socket": { "type": "string", "minLength": 1 }
-      }
+    "gstInput": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Plain GStreamer pipeline or canonical @dvrk:role:name socket reference."
+    },
+    "gstOutput": {
+      "type": "string",
+      "pattern": "^@dvrk:[^:]+:[^:]+$",
+      "description": "Canonical dVRK abstract socket reference."
     }
   }
 }

@@ -8,8 +8,6 @@
 
 #include <algorithm>
 #include <string>
-#include <utility>
-#include <vector>
 
 #include <dvrk_data/config.hpp>
 #include <dvrk_data/dvrk_gst_socket.hpp>
@@ -138,79 +136,6 @@ inline void warn_if_interlaced_stream(const std::string &stream,
   gst_element_set_state(pipeline, GST_STATE_NULL);
   gst_object_unref(probe_sink);
   gst_object_unref(pipeline);
-}
-
-/// Resolve a sink's "socket" field to a full abstract name using the given role.
-inline std::string resolve_unixfd_sink(
-    const sv::UnixfdSinkConfig &sink, const std::string &default_role) {
-  return dvrk_gst::resolve(sink.socket, default_role);
-}
-
-/// Collect all unixfd sinks whose short name (last ':' component) matches.
-inline std::vector<sv::UnixfdSinkConfig>
-collect_unixfd_sinks(const sv::AppConfig &cfg, const std::string &role,
-                     const std::string &short_name) {
-  std::vector<sv::UnixfdSinkConfig> sinks;
-  const std::string full = dvrk_gst::make(role, short_name);
-  for (const auto &sink : cfg.unixfd_sinks) {
-    const std::string resolved = dvrk_gst::resolve(sink.socket, role);
-    if (resolved == full) {
-      sinks.push_back(sink);
-    }
-  }
-  return sinks;
-}
-
-/// Resolve a source's "socket" field to a full abstract name using the given role.
-inline std::string resolve_unixfd_source(
-    const sv::UnixfdSourceConfig &source, const std::string &default_role) {
-  return dvrk_gst::resolve(source.socket, default_role);
-}
-
-/// Collect all unixfd sources whose short name (last ':' component) matches.
-inline std::vector<sv::UnixfdSourceConfig>
-collect_unixfd_sources(const sv::AppConfig &cfg, const std::string &source_role,
-                       const std::string &short_name) {
-  std::vector<sv::UnixfdSourceConfig> sources;
-  const std::string full = dvrk_gst::make(source_role, short_name);
-  for (const auto &src : cfg.unixfd_sources) {
-    const std::string resolved = dvrk_gst::resolve(src.socket, source_role);
-    if (resolved == full) {
-      sources.push_back(src);
-    }
-  }
-  return sources;
-}
-
-/// Build a GStreamer unixfdsrc fragment from a fully-qualified abstract name.
-/// Convenience wrapper around dvrk_gst::build_src().
-inline std::string build_unixfdsrc_string(const std::string &abstract_name,
-                                          int width, int height) {
-  return dvrk_gst::build_src(abstract_name, width, height);
-}
-
-/// Ensure at least one sink with the given short name exists; add a default if empty.
-inline void ensure_sink(std::vector<sv::UnixfdSinkConfig> &sinks,
-                        const std::string &short_name) {
-  if (!sinks.empty()) {
-    return;
-  }
-  sv::UnixfdSinkConfig sink;
-  sink.socket = short_name;
-  sinks.push_back(std::move(sink));
-}
-
-/// For abstract sockets the kernel reclaims them automatically when the process
-/// exits, so there is nothing to remove.  This function is kept for API
-/// compatibility but is a no-op; it logs the sockets that will be (re)opened.
-inline void remove_stale_sockets(const std::string & /*app_name*/,
-                                 const std::vector<sv::UnixfdSinkConfig> &sinks,
-                                 const std::string &role,
-                                 const rclcpp::Logger &logger) {
-  for (const auto &sink : sinks) {
-    RCLCPP_DEBUG(logger, "unixfd abstract sink: %s",
-                 dvrk_gst::resolve(sink.socket, role).c_str());
-  }
 }
 
 inline bool validate_pipeline(const std::string &pipeline_string,

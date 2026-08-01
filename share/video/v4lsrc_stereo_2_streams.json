@@ -3,7 +3,7 @@
     "videos": [
 	{
 	    "name": "left",
-	    "stream": "v4l2src device=/dev/video0 ! videoconvert",
+	    "gst_input": "v4l2src device=/dev/video0 ! videoconvert",
 	    "record": true,
 	    "encoding": {
 		"bitrate_kbps": 20000
@@ -11,7 +11,7 @@
 	},
 	{
 	    "name": "right",
-	    "stream": "v4l2src device=/dev/video2 ! videoconvert",
+	    "gst_input": "v4l2src device=/dev/video2 ! videoconvert",
 	    "record": true,
 	    "encoding": {
 		"bitrate_kbps": 20000

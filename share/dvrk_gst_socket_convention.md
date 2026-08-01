@@ -1,203 +1,83 @@
-# dvrk_gst Socket Naming Convention
+# dVRK GStreamer endpoint convention
 
-This document describes the abstract Unix socket naming convention used for
-inter-process video streaming in the dVRK software stack.
+All dVRK-managed GStreamer Unix sockets use the canonical abstract name:
 
-## Overview
-
-Video frames are exchanged between dVRK nodes through GStreamer
-[`unixfdsink`](https://gstreamer.freedesktop.org/documentation/unixfd/unixfdsink.html) /
-[`unixfdsrc`](https://gstreamer.freedesktop.org/documentation/unixfd/unixfdsrc.html)
-elements.  Every socket lives in the **Linux abstract namespace** — sockets have
-no entry in `/tmp` and are reclaimed automatically by the kernel when all
-file descriptors referencing them are closed.
-
-## Naming pattern
-
-```
-@dvrk_gst:<role>:<name>
+```text
+@dvrk:<role>:<name>
 ```
 
-| Field  | Description                                                |
-|--------|------------------------------------------------------------|
-| `@`    | Signals an abstract-namespace socket (our convention).     |
-| `role` | Fixed per application type (see table below).              |
-| `name` | Short identifier unique within a role (e.g. `left`, `stereo`). |
+The `@dvrk:` prefix is mandatory. It identifies a socket carrying dVRK frame
+metadata and using the dVRK reconnection/data path. Bare `@` socket names are
+not dVRK endpoint references.
 
-### Fixed roles
+The fixed roles are:
 
-| Role                | Produced by                        | Typical names          |
-|---------------------|------------------------------------|------------------------|
-| `stereo_source`     | `stereo_source`, AR scripts        | `left`, `right`, `left_ar`, `right_ar` |
-| `stereo_alignment`  | `stereo_alignment`                 | `stereo`               |
-| `stereo_display`    | `stereo_display` (dvrk_console)    | `stereo`, `overlay`    |
+| Role | Inputs | Outputs |
+| --- | --- | --- |
+| `stereo_source` | camera pipelines | `left`, `right` |
+| `stereo_alignment` | source `left`, `right` | `stereo` |
+| `stereo_display` | aligned `stereo` | optional `stereo`, `overlay` |
 
-### Multi-instance naming
+## JSON fields
 
-When two instances of the same role run simultaneously (e.g. two camera inputs),
-embed a discriminator in the short name:
+Use `gst_input` for an input. It may contain either ordinary GStreamer
+pipeline text or a canonical dVRK socket reference. Use `gst_output` for an
+output socket; it must always be a canonical `@dvrk:` reference.
 
-```
-@dvrk_gst:stereo_source:hdmi_left
-@dvrk_gst:stereo_source:sdi_left
-@dvrk_gst:stereo_alignment:hdmi_stereo
-```
-
-The corresponding JSON `unixfdsources` entries must reference the discriminated
-names:
-
-```json
-{"socket": "stereo_source:hdmi_left"}
-```
-
-## GStreamer pipeline fragments
-
-The `@` is stripped when passing the name to GStreamer's `socket-path=` property.
-Both elements require `socket-type=abstract`:
-
-```
-unixfdsink socket-path=dvrk_gst:stereo_source:left  socket-type=abstract sync=false async=false
-unixfdsrc  socket-path=dvrk_gst:stereo_alignment:stereo  socket-type=abstract do-timestamp=true
-```
-
-The C++ utility (`dvrk_gst::build_sink()`, `dvrk_gst::build_src()`) and the
-Python utility (`dvrk_gst.build_sink()`, `dvrk_gst.build_src()`) generate these
-strings from a fully-qualified name.
-
-## JSON configuration
-
-All JSON configuration files use a single `"socket"` field.  Three forms are
-accepted by the resolution functions:
-
-| Form                               | Expands to                                    |
-|------------------------------------|-----------------------------------------------|
-| `"left"`                           | `@dvrk_gst:<default_role>:left`               |
-| `"stereo_alignment:stereo"`        | `@dvrk_gst:stereo_alignment:stereo`           |
-| `"@dvrk_gst:stereo_alignment:stereo"` | used as-is                               |
-
-### stereo_source
+For example, a source configuration can be written as:
 
 ```json
 {
-  "type": "dvrk_data:stereo_source@1.0.0",
-  "unixfdsinks": [
-    {"socket": "left"},
-    {"socket": "right"}
-  ]
-}
-```
-Default role for `unixfdsinks`: `stereo_source`.
-
-### stereo_alignment
-
-```json
-{
-  "type": "dvrk_data:stereo_alignment@1.0.0",
-  "unixfdsources": [
-    {"socket": "left"},
-    {"socket": "right"}
-  ],
-  "unixfdsinks": [
-    {"socket": "stereo"}
-  ]
-}
-```
-
-Default role for `unixfdsources`: `stereo_source` (alignment reads from the
-source app).  Default role for `unixfdsinks`: `stereo_alignment`.
-
-### stereo_display
-
-```json
-{
-  "type": "dvrk_console:stereo_display@1.0.0",
-  "unixfdsinks": [
-    {"socket": "stereo"},
-    {"socket": "overlay"}
-  ],
-  "stereo": {
-    "socket": "stereo_alignment:stereo"
+  "camera": {
+    "left": {
+      "gst_input": "v4l2src device=/dev/video0",
+      "gst_output": "@dvrk:stereo_source:left"
+    },
+    "right": {
+      "gst_input": "v4l2src device=/dev/video2",
+      "gst_output": "@dvrk:stereo_source:right"
+    }
   }
 }
 ```
 
-The `stereo.socket` field accepts any of the three forms above.  When omitted,
-fall back to `stereo.stream` (raw GStreamer pipeline string).
-
-Default role for `unixfdsinks`: `stereo_display`.
-
-### record
+Alignment consumes those endpoints and publishes one stereo endpoint:
 
 ```json
 {
-  "type": "dvrk_data:record@1.0.0",
-  "videos": [
-    {
-      "name": "stereo_recording",
-      "socket": "stereo_alignment:stereo",
-      "side_by_side": "LR"
-    }
-  ]
+  "camera": {
+    "left": {"gst_input": "@dvrk:stereo_source:left"},
+    "right": {"gst_input": "@dvrk:stereo_source:right"}
+  },
+  "gst_output": "@dvrk:stereo_alignment:stereo"
 }
 ```
 
-When `"socket"` is present, `"stream"` is ignored.  Use the full
-`"role:name"` form to unambiguously identify the producer.
+Display accepts either a pipeline or socket input:
 
-## Discovery
-
-### Command-line (ss)
-
-```bash
-ss -x | grep dvrk_gst
-```
-
-Example output:
-```
-u_str LISTEN 0 128 @dvrk_gst:stereo_source:left  0
-u_str LISTEN 0 128 @dvrk_gst:stereo_source:right 0
-u_str LISTEN 0 128 @dvrk_gst:stereo_alignment:stereo 0
-```
-
-### C++ API
-
-```cpp
-#include <dvrk_data/dvrk_gst_socket.hpp>
-
-// List all active @dvrk_gst sockets:
-dvrk_gst::print_sockets();
-
-// Programmatic access:
-for (const auto &name : dvrk_gst::list_sockets()) {
-    std::cout << name << "\n";
-}
-
-// Check one socket, print alternatives on failure:
-if (!dvrk_gst::check_socket("@dvrk_gst:stereo_alignment:stereo")) {
-    // error already printed to stderr
+```json
+{
+  "gst_input": "@dvrk:stereo_alignment:stereo",
+  "eye_size": {"width": 1920, "height": 1080},
+  "gst_output": "@dvrk:stereo_display:stereo"
 }
 ```
 
-### Python API
+The source and alignment executables calculate their standard output names
+when `gst_output` is omitted. Display output is optional. `pip_gst_inputs`
+replaces the old extra-stream setting and uses nested `gst_input` objects for
+monoscopic and stereo picture-in-picture streams.
 
-```python
-import dvrk_data.dvrk_gst_socket as dvrk_gst
+## GStreamer and discovery
 
-# List and print:
-dvrk_gst.print_sockets()
+The `@` is removed when constructing GStreamer properties:
 
-# Programmatic access:
-for name in dvrk_gst.list_sockets():
-    print(name)
-
-# Check one socket:
-if not dvrk_gst.check_socket("@dvrk_gst:stereo_alignment:stereo"):
-    pass  # error already printed to stderr
+```text
+unixfdsink socket-path=dvrk:stereo_source:left socket-type=abstract
+unixfdsrc  socket-path=dvrk:stereo_source:left socket-type=abstract
 ```
 
-## Shared utility locations
-
-| Language | File                                                          |
-|----------|---------------------------------------------------------------|
-| C++      | `dvrk_data/include/dvrk_data/dvrk_gst_socket.hpp`            |
-| Python   | `dvrk_data/dvrk_data/dvrk_gst_socket.py`                     |
+The shared C++ and Python helpers provide `make`, `resolve`, `build_input`,
+`build_sink`, `build_src`, and socket discovery. `resolve` accepts only the
+canonical `@dvrk:role:name` form; plain input pipelines are passed through
+unchanged.

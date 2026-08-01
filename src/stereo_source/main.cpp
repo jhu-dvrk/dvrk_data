@@ -4,7 +4,6 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
-#include <vector>
 
 #include <dvrk_data/config.hpp>
 #include <dvrk_data/cpu_timestamp_meta.hpp>
@@ -99,44 +98,25 @@ void add_timestamp_probe(GstElement *pipeline, const std::string &element_name,
 std::string build_branch(const std::string &source,
                          const std::string &stream_name,
                          const std::string &queue_name,
-                         const std::string &tee_name,
-                         const std::vector<sv::UnixfdSinkConfig> &sinks,
-                         const std::string &role) {
+                         const std::string &output) {
   std::string branch =
       source + " ! queue name=" + queue_name +
       " max-size-buffers=3 max-size-time=0 max-size-bytes=0 leaky=downstream";
 
-  if (sinks.size() > 1) {
-    branch += " ! tee name=" + tee_name + " ";
-  }
-
-  for (std::size_t i = 0; i < sinks.size(); ++i) {
-    if (sinks.size() > 1) {
-      branch += " " + tee_name +
-                ". ! queue max-size-buffers=2 max-size-time=0 "
-                "max-size-bytes=0 leaky=downstream";
-    }
-
-    const std::string abstract_name = dvrk_gst::resolve(sinks[i].socket, role);
-    branch += " ! videoconvert ! video/x-raw,format=I420"
-              " ! queue name=__" +
-              stream_name + "_unixfd_q" + std::to_string(i) +
-              "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-              "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
-  }
-
+  const std::string abstract_name = dvrk_gst::resolve(output);
+  branch += " ! videoconvert ! video/x-raw,format=I420"
+            " ! queue name=__" +
+            stream_name + "_output_q__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+            "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
   return branch;
 }
 
-std::string build_pipeline_string(
-    const sv::AppConfig &cfg,
-    const std::vector<sv::UnixfdSinkConfig> &left_sinks,
-    const std::vector<sv::UnixfdSinkConfig> &right_sinks) {
-  return build_branch(cfg.left.source, "left", "__left_src_q__", "__left_out__",
-                      left_sinks, dvrk_gst::ROLE_STEREO_SOURCE) +
+std::string build_pipeline_string(const sv::AppConfig &cfg) {
+  return build_branch(cfg.left.gst_input, "left", "__left_src_q__",
+                      cfg.left.gst_output) +
          " " +
-         build_branch(cfg.right.source, "right", "__right_src_q__",
-                      "__right_out__", right_sinks, dvrk_gst::ROLE_STEREO_SOURCE);
+         build_branch(cfg.right.gst_input, "right", "__right_src_q__",
+                      cfg.right.gst_output);
 }
 
 }  // namespace
@@ -182,39 +162,45 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (cfg.left.source.empty() || cfg.right.source.empty()) {
+  if (cfg.left.gst_input.empty() || cfg.right.gst_input.empty()) {
     RCLCPP_ERROR(node->get_logger(),
-                 "Config '%s' must define camera.left.stream and "
-                 "camera.right.stream",
+                 "Config '%s' must define camera.left.gst_input and "
+                 "camera.right.gst_input",
                  cfg.name.c_str());
     rclcpp::shutdown();
     return 1;
   }
 
-  auto left_sinks = dc_stereo::collect_unixfd_sinks(cfg, dvrk_gst::ROLE_STEREO_SOURCE, "left");
-  auto right_sinks = dc_stereo::collect_unixfd_sinks(cfg, dvrk_gst::ROLE_STEREO_SOURCE, "right");
-  dc_stereo::ensure_sink(left_sinks, "left");
-  dc_stereo::ensure_sink(right_sinks, "right");
+  if (cfg.left.gst_output.empty())
+    cfg.left.gst_output = dvrk_gst::make(dvrk_gst::ROLE_STEREO_SOURCE, "left");
+  if (cfg.right.gst_output.empty())
+    cfg.right.gst_output = dvrk_gst::make(dvrk_gst::ROLE_STEREO_SOURCE, "right");
 
-  dc_stereo::remove_stale_sockets(cfg.name, left_sinks, dvrk_gst::ROLE_STEREO_SOURCE, node->get_logger());
-  dc_stereo::remove_stale_sockets(cfg.name, right_sinks, dvrk_gst::ROLE_STEREO_SOURCE, node->get_logger());
+  cfg.left.gst_input = dvrk_gst::build_input(
+      cfg.left.gst_input, dvrk_gst::ROLE_STEREO_SOURCE,
+      cfg.original_width, cfg.original_height);
+  cfg.right.gst_input = dvrk_gst::build_input(
+      cfg.right.gst_input, dvrk_gst::ROLE_STEREO_SOURCE,
+      cfg.original_width, cfg.original_height);
 
-  for (const auto &sink : left_sinks) {
-    RCLCPP_INFO(node->get_logger(), "left unixfd sink: %s",
-                dvrk_gst::resolve(sink.socket, dvrk_gst::ROLE_STEREO_SOURCE).c_str());
+  for (const auto &output : {cfg.left.gst_output, cfg.right.gst_output}) {
+    if (dvrk_gst::resolve(output).empty()) {
+      RCLCPP_ERROR(node->get_logger(), "Invalid gst_output socket reference: %s",
+                   output.c_str());
+      rclcpp::shutdown();
+      return 1;
+    }
   }
-  for (const auto &sink : right_sinks) {
-    RCLCPP_INFO(node->get_logger(), "right unixfd sink: %s",
-                dvrk_gst::resolve(sink.socket, dvrk_gst::ROLE_STEREO_SOURCE).c_str());
-  }
 
-  dc_stereo::warn_if_interlaced_stream(cfg.left.source, node->get_logger(),
+  RCLCPP_INFO(node->get_logger(), "left gst output: %s", cfg.left.gst_output.c_str());
+  RCLCPP_INFO(node->get_logger(), "right gst output: %s", cfg.right.gst_output.c_str());
+
+  dc_stereo::warn_if_interlaced_stream(cfg.left.gst_input, node->get_logger(),
                                        "camera.left");
-  dc_stereo::warn_if_interlaced_stream(cfg.right.source, node->get_logger(),
+  dc_stereo::warn_if_interlaced_stream(cfg.right.gst_input, node->get_logger(),
                                        "camera.right");
 
-  const std::string pipeline_string =
-      build_pipeline_string(cfg, left_sinks, right_sinks);
+  const std::string pipeline_string = build_pipeline_string(cfg);
   if (!dc_stereo::validate_pipeline(pipeline_string, node->get_logger(),
                                     "stereo_source")) {
     rclcpp::shutdown();
@@ -242,9 +228,10 @@ int main(int argc, char *argv[]) {
   add_timestamp_probe(pipeline, "__left_src_q__", 0);
   add_timestamp_probe(pipeline, "__right_src_q__", 1);
 
-  const int rc = dc_stereo::run_pipeline(
-      pipeline, node, "stereo_source", "Stereo source unixfd pipeline started");
+  const int status = dc_stereo::run_pipeline(
+      pipeline, node, "stereo_source",
+      "Stereo source background pipeline started");
   gst_object_unref(pipeline);
   rclcpp::shutdown();
-  return rc;
+  return status;
 }

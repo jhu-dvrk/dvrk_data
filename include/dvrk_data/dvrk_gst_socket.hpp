@@ -6,12 +6,12 @@
 // Convention
 // ----------
 // Every inter-process video socket follows the pattern:
-//   @dvrk_gst:<role>:<name>
+//   @dvrk:<role>:<name>
 //
 // The leading '@' is our notation for a Linux abstract-namespace socket.
 // In GStreamer pipeline strings the '@' is stripped:
-//   unixfdsink socket-path=dvrk_gst:<role>:<name> socket-type=abstract
-//   unixfdsrc  socket-path=dvrk_gst:<role>:<name> socket-type=abstract
+//   unixfdsink socket-path=dvrk:<role>:<name> socket-type=abstract
+//   unixfdsrc  socket-path=dvrk:<role>:<name> socket-type=abstract
 //
 // Abstract sockets are not visible in the file system; they are automatically
 // released by the kernel when the last file descriptor that references them is
@@ -25,16 +25,12 @@
 //
 // Short-name resolution in JSON
 // -----------------------------
-// JSON configs use a single "socket" field.  Three forms are accepted:
-//   "left"                         → @dvrk_gst:<default_role>:left
-//   "stereo_alignment:stereo"      → @dvrk_gst:stereo_alignment:stereo
-//   "@dvrk_gst:stereo_source:left" → used as-is
-//
-// The default_role is supplied by each application component at parse time.
+// JSON configs use "gst_input" and "gst_output" fields.  Socket values use:
+//   "@dvrk:stereo_source:left"     → used as-is
 //
 // Discovery
 // ---------
-// list_sockets()  — returns all @dvrk_gst:* abstract sockets currently in the kernel
+// list_sockets()  — returns all @dvrk:* abstract sockets currently in the kernel
 // print_sockets() — pretty-prints the list
 // check_socket()  — verifies a socket exists; prints alternatives on failure
 
@@ -42,6 +38,7 @@
 #define DVRK_GST_SOCKET_HPP
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -57,49 +54,42 @@ static constexpr const char *ROLE_STEREO_ALIGNMENT = "stereo_alignment";
 static constexpr const char *ROLE_STEREO_DISPLAY   = "stereo_display";
 
 // Prefix shared by all dvrk GStreamer abstract sockets.
-static constexpr const char *PREFIX = "@dvrk_gst:";
+static constexpr const char *PREFIX = "@dvrk:";
 
 // ── Name construction ────────────────────────────────────────────────────────
 
-/// Build a fully-qualified abstract socket name: "@dvrk_gst:<role>:<name>".
+/// Build a fully-qualified abstract socket name: "@dvrk:<role>:<name>".
 inline std::string make(const std::string &role, const std::string &name) {
     return std::string(PREFIX) + role + ":" + name;
 }
 
 // ── Resolution ───────────────────────────────────────────────────────────────
 
-/// Resolve a value from the "socket" JSON field to a fully-qualified abstract
+/// Resolve an @ value from a JSON field to a fully-qualified abstract
 /// socket name.
 ///
-/// Accepted forms:
-///   "@dvrk_gst:role:name" → returned as-is
-///   "role:name"           → "@dvrk_gst:role:name"
-///   "name"                → "@dvrk_gst:<default_role>:name"
+/// Only the canonical "@dvrk:role:name" form is accepted.
 ///
-/// @param socket_field  Raw value from the JSON "socket" key.
-/// @param default_role  Role string used when the field contains only a name.
+/// @param socket_field  Raw value from a JSON gst_input/gst_output key.
+/// @param default_role  Application role context; canonical references do not need it.
+inline bool is_socket_reference(const std::string &value) {
+    return value.rfind(PREFIX, 0) == 0;
+}
+
 inline std::string resolve(const std::string &socket_field,
-                           const std::string &default_role) {
+                           const std::string &default_role = {}) {
+    (void)default_role;
     if (socket_field.empty()) return {};
 
-    // Already fully-qualified.
-    if (socket_field.rfind(PREFIX, 0) == 0) {
-        return socket_field;
+    if (!is_socket_reference(socket_field)) {
+        return {};
     }
-
-    // "role:name" form — colon present but no @dvrk_gst: prefix.
-    auto colon = socket_field.find(':');
-    if (colon != std::string::npos) {
-        return std::string(PREFIX) + socket_field;
-    }
-
-    // Short name only.
-    return make(default_role, socket_field);
+    return socket_field;
 }
 
 // ── GStreamer integration ─────────────────────────────────────────────────────
 
-/// Convert a fully-qualified abstract name ("@dvrk_gst:role:name") to the
+/// Convert a fully-qualified abstract name ("@dvrk:role:name") to the
 /// value used in GStreamer's socket-path= property (strip the leading '@').
 inline std::string to_gst_path(const std::string &abstract_name) {
     if (!abstract_name.empty() && abstract_name[0] == '@') {
@@ -110,7 +100,7 @@ inline std::string to_gst_path(const std::string &abstract_name) {
 
 /// Build a complete GStreamer unixfdsink pipeline fragment.
 ///
-/// @param abstract_name  Fully-qualified name, e.g. "@dvrk_gst:stereo_source:left".
+/// @param abstract_name  Fully-qualified name, e.g. "@dvrk:stereo_source:left".
 /// @param sync           Value for the GStreamer sync= property (default false).
 inline std::string build_sink(const std::string &abstract_name,
                               bool sync = false) {
@@ -121,7 +111,7 @@ inline std::string build_sink(const std::string &abstract_name,
 
 /// Build a complete GStreamer unixfdsrc pipeline fragment.
 ///
-/// @param abstract_name  Fully-qualified name, e.g. "@dvrk_gst:stereo_source:left".
+/// @param abstract_name  Fully-qualified name, e.g. "@dvrk:stereo_source:left".
 /// @param width          Caps width.  No caps filter added when width <= 0.
 /// @param height         Caps height.  No caps filter added when height <= 0.
 /// @param format         Pixel format for the caps filter (default "I420").
@@ -138,14 +128,25 @@ inline std::string build_src(const std::string &abstract_name,
     return s;
 }
 
+/// Return a plain pipeline unchanged, or expand an @ socket reference to src.
+inline std::string build_input(const std::string &gst_input,
+                               const std::string &default_role,
+                               int width = 0, int height = 0,
+                               const std::string &format = "I420") {
+    if (!is_socket_reference(gst_input)) return gst_input;
+    const auto socket_name = resolve(gst_input, default_role);
+    if (socket_name.empty()) return {};
+    return build_src(socket_name, width, height, format);
+}
+
 // ── Discovery ────────────────────────────────────────────────────────────────
 
-/// Return all @dvrk_gst:* abstract socket names currently registered in the
+/// Return all @dvrk:* abstract socket names currently registered in the
 /// kernel, by parsing /proc/net/unix.
 ///
 /// Abstract sockets appear in /proc/net/unix with their name prefixed by '@'
 /// (representing the leading null byte of the abstract-namespace address).
-/// Each name is returned in the "@dvrk_gst:role:name" form.
+/// Each name is returned in the "@dvrk:role:name" form.
 inline std::vector<std::string> list_sockets() {
     std::vector<std::string> result;
     std::ifstream f("/proc/net/unix");
@@ -179,14 +180,14 @@ inline std::vector<std::string> list_sockets() {
     return result;
 }
 
-/// Print all existing @dvrk_gst sockets to the given stream.
+/// Print all existing @dvrk sockets to the given stream.
 inline void print_sockets(std::ostream &out = std::cout) {
     auto sockets = list_sockets();
     if (sockets.empty()) {
-        out << "No @dvrk_gst abstract sockets found." << std::endl;
+        out << "No @dvrk abstract sockets found." << std::endl;
         return;
     }
-    out << "Available @dvrk_gst sockets:" << std::endl;
+    out << "Available @dvrk sockets:" << std::endl;
     for (const auto &s : sockets) {
         out << "  " << s << std::endl;
     }
@@ -205,9 +206,9 @@ inline bool check_socket(const std::string &abstract_name,
 
     err << "Socket not found: " << abstract_name << std::endl;
     if (sockets.empty()) {
-        err << "No @dvrk_gst sockets are currently active." << std::endl;
+        err << "No @dvrk sockets are currently active." << std::endl;
     } else {
-        err << "Available @dvrk_gst sockets:" << std::endl;
+        err << "Available @dvrk sockets:" << std::endl;
         for (const auto &s : sockets) {
             err << "  " << s << std::endl;
         }

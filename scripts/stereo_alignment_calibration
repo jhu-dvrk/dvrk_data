@@ -323,7 +323,7 @@ def open_capture(source_label: str, source_snippet: str):
                 f"\nThe abstract socket {socket_path} could not be opened.\n"
                 "Make sure stereo_source is running with the matching configuration:\n"
                 "  ros2 run dvrk_data stereo_source -c <stereo_source.json>\n"
-                "\nTo list currently active @dvrk_gst sockets:\n"
+                "\nTo list currently active @dvrk sockets:\n"
                 "  ros2 run dvrk_data gscam_socket"
             )
         raise RuntimeError(msg)
@@ -340,10 +340,10 @@ def ensure_config_fields(config):
     sz.setdefault("width", 0)
     sz.setdefault("height", 0)
     lft = cam.setdefault("left", {})
-    lft.setdefault("stream", "")
+    lft.setdefault("gst_input", "")
     lft.setdefault("color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
     rgt = cam.setdefault("right", {})
-    rgt.setdefault("stream", "")
+    rgt.setdefault("gst_input", "")
     rgt.setdefault("color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
     return config
 
@@ -359,8 +359,8 @@ def load_or_create(path: Path):
         "preserve_size": True,
         "camera": {
             "size": {"width": 0, "height": 0},
-            "left": {"stream": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
-            "right": {"stream": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
+            "left": {"gst_input": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
+            "right": {"gst_input": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
         },
     }
 
@@ -381,9 +381,9 @@ def parse_args():
 
 def apply_stream_overrides(config, args):
     if args.left is not None:
-        config.setdefault("camera", {}).setdefault("left", {})["stream"] = args.left
+        config.setdefault("camera", {}).setdefault("left", {})["gst_input"] = args.left
     if args.right is not None:
-        config.setdefault("camera", {}).setdefault("right", {})["stream"] = args.right
+        config.setdefault("camera", {}).setdefault("right", {})["gst_input"] = args.right
 
 
 def update_config_from_runtime(config, left, right, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, left_color, right_color):
@@ -400,9 +400,9 @@ def update_config_from_runtime(config, left, right, original_w, original_h, crop
     if "right" not in cam:
         cam["right"] = {}
     
-    cam["left"]["stream"] = left
+    cam["left"]["gst_input"] = left
     cam["left"]["color"] = left_color
-    cam["right"]["stream"] = right
+    cam["right"]["gst_input"] = right
     cam["right"]["color"] = right_color
 
     if int(crop_w) != int(original_w) or int(crop_h) != int(original_h):
@@ -418,40 +418,21 @@ def update_config_from_runtime(config, left, right, original_w, original_h, crop
 def interactive_tune(config, split_mode=False):
     app_name = config.get("name", "dvrk_display")
     cam_cfg = config.get("camera", {})
-    left = cam_cfg.get("left", {}).get("stream", "").strip()
-    right = cam_cfg.get("right", {}).get("stream", "").strip()
+    left = cam_cfg.get("left", {}).get("gst_input", "").strip()
+    right = cam_cfg.get("right", {}).get("gst_input", "").strip()
 
     # Get camera dimensions from config
     cam_size = cam_cfg.get("size", {})
     original_w = int(cam_size.get("width", 0))
     original_h = int(cam_size.get("height", 0))
 
-    # Resolve left unixfdsrc if stream is empty.
-    # Match by the short name (last ':'-separated token) or the "name" field.
-    def _eye_matches(src, eye: str) -> bool:
-        socket_field = src.get("socket", "")
-        short = socket_field.rsplit(":", 1)[-1] if socket_field else ""
-        return short == eye or src.get("name", "") == eye
-
-    if not left:
-        left_sources = [src for src in config.get("unixfdsources", []) if _eye_matches(src, "left")]
-        if left_sources:
-            socket_field = left_sources[0].get("socket", "left")
-            abstract_name = dvrk_gst.resolve(socket_field, dvrk_gst.ROLE_STEREO_SOURCE)
-            left = dvrk_gst.build_src(abstract_name, original_w, original_h)
-            print(f"Resolved left unixfd source: {abstract_name}")
-
-    # Resolve right unixfdsrc if stream is empty
-    if not right:
-        right_sources = [src for src in config.get("unixfdsources", []) if _eye_matches(src, "right")]
-        if right_sources:
-            socket_field = right_sources[0].get("socket", "right")
-            abstract_name = dvrk_gst.resolve(socket_field, dvrk_gst.ROLE_STEREO_SOURCE)
-            right = dvrk_gst.build_src(abstract_name, original_w, original_h)
-            print(f"Resolved right unixfd source: {abstract_name}")
+    left = dvrk_gst.build_input(
+        left, dvrk_gst.ROLE_STEREO_SOURCE, original_w, original_h)
+    right = dvrk_gst.build_input(
+        right, dvrk_gst.ROLE_STEREO_SOURCE, original_w, original_h)
 
     if not left or not right:
-        raise RuntimeError("Both camera.left.stream and camera.right.stream (or unixfdsources) are required")
+        raise RuntimeError("Both camera.left.gst_input and camera.right.gst_input are required")
 
     left_cap = open_capture("left", left)
     right_cap = open_capture("right", right)

@@ -448,7 +448,7 @@ def index_videos(index_data):
                 continue
             item = dict(video)
             if stream_name:
-                item["stream"] = stream_name
+                item["gst_input"] = stream_name
             videos.append(item)
 
     return videos

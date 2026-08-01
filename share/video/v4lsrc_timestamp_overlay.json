@@ -9,7 +9,7 @@
       },
       "estimated_latency": 0.1484626329,
       "name": "main_camera",
-      "stream": "v4l2src device=/dev/video0",
+      "gst_input": "v4l2src device=/dev/video0",
       "timestamp_overlay": true
     }
   ]

@@ -11,7 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
-PREFIX = "@dvrk_gst:"
+PREFIX = "@dvrk:"
 ROLE_STEREO_SOURCE = "stereo_source"
 ROLE_STEREO_ALIGNMENT = "stereo_alignment"
 
@@ -130,20 +130,16 @@ def build_source_config(path, sockets):
         {
             "type": "dvrk_data:stereo_source@1.0.0",
             "name": "dvrk_smoke",
-            "unixfdsinks": [
-                {"socket": sockets["left"]},
-                {"socket": sockets["right"]},
-            ],
             "camera": {
                 "size": {"width": 640, "height": 480},
                 "left": {
-                    "stream": (
+                    "gst_input": (
                         "videotestsrc pattern=smpte is-live=true "
                         "! video/x-raw,width=640,height=480,framerate=30/1"
                     )
                 },
                 "right": {
-                    "stream": (
+                    "gst_input": (
                         "videotestsrc pattern=ball is-live=true "
                         "! video/x-raw,width=640,height=480,framerate=30/1"
                     )
@@ -159,17 +155,13 @@ def build_alignment_config(path, sockets):
         {
             "type": "dvrk_data:stereo_alignment@1.0.0",
             "name": "dvrk_smoke",
-            "unixfdsinks": [
-                {"socket": sockets["stereo"]}
-            ],
-            "unixfdsources": [
-                {"socket": sockets["left"]},
-                {"socket": sockets["right"]},
-            ],
+            "gst_output": sockets["stereo"],
             "camera": {
                 "size": {"width": 640, "height": 480},
                 "crop": {"width": 640, "height": 480},
                 "alignment": {"horizontal_shift_px": 0, "vertical_shift_px": 0},
+                "left": {"gst_input": sockets["left"]},
+                "right": {"gst_input": sockets["right"]},
             },
         },
     )
@@ -184,10 +176,8 @@ def build_stereo_config(path, sockets, display_enabled):
             "name": "dvrk_smoke",
             "dvrk_console_namespace": "console",
             "sinks": sinks,
-            "unixfdsources": [{"socket": sockets["stereo"]}],
-            "stereo": {
-                "eye_size": {"width": 640, "height": 480},
-            },
+            "gst_input": sockets["stereo"],
+            "eye_size": {"width": 640, "height": 480},
         },
     )
 
@@ -201,7 +191,7 @@ def build_record_config(path, output_dir, sockets):
             "videos": [
                 {
                     "name": "dvrk_smoke_stereo",
-                    "socket": sockets["stereo"],
+                    "gst_input": sockets["stereo"],
                     "record": True,
                     "timestamp_overlay": False,
                     "side_by_side": "LR",

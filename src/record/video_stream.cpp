@@ -141,10 +141,12 @@ bool VideoStream::create(AppData* ad, const dc::VideoConfig* v) {
                      " ! clockoverlay valignment=bottom halignment=right time-format=\"%Y-%m-%d %H:%M:%S\" font-desc=\"Sans, 10\" shaded-background=true shading-value=255 xpad=0 ypad=0 ";
     }
 
-    std::string source_stream = v->stream;
+    std::string source_stream = dvrk_gst::build_input(
+        v->gst_input, dvrk_gst::ROLE_STEREO_DISPLAY);
 
-    if (!v->socket.empty()) {
-        const std::string abstract_name = dvrk_gst::resolve(v->socket, "");
+    if (dvrk_gst::is_socket_reference(v->gst_input)) {
+        const std::string abstract_name = dvrk_gst::resolve(
+            v->gst_input, dvrk_gst::ROLE_STEREO_DISPLAY);
         if (!dvrk_gst::check_socket(abstract_name)) {
             std::cerr << "Warning: socket '" << abstract_name
                       << "' not yet active; pipeline will retry on connect." << std::endl;
@@ -172,7 +174,7 @@ bool VideoStream::create(AppData* ad, const dc::VideoConfig* v) {
     }
 
     // Warning for two sources but side_by_side setting missing
-    if (v->socket.empty() && this->side_by_side == "undefined") {
+    if (!dvrk_gst::is_socket_reference(v->gst_input) && this->side_by_side == "undefined") {
         size_t pos = 0;
         int sources = 0;
         while ((pos = source_stream.find("src", pos)) != std::string::npos) {

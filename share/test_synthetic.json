@@ -3,7 +3,7 @@
   "videos": [
     {
       "name": "dvrk_test_synthetic",
-      "socket": "stereo_alignment:stereo",
+      "gst_input": "@dvrk:stereo_alignment:stereo",
       "record": true,
       "timestamp_overlay": false,
       "encoding": {

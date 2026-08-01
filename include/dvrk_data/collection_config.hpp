@@ -19,8 +19,7 @@ struct VideoEncoding {
 
 struct VideoConfig {
     std::string name;
-    std::string stream;   // raw GStreamer pipeline string (mutually exclusive with socket)
-    std::string socket;   // abstract socket name (@dvrk_gst:role:name); overrides stream
+    std::string gst_input; // raw GStreamer pipeline or @dvrk socket reference
     VideoEncoding encoding;
     bool record = true;
     bool timestamp_overlay = false;

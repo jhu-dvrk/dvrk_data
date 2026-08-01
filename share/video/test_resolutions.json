@@ -11,7 +11,7 @@
       "estimated_latency": 0.0910993096,
       "name": "AnkerWork_C310",
       "record": true,
-      "stream": "v4l2src device=/dev/video4 ! image/jpeg,width=1920,height=1080,framerate=60/1 ! jpegdec ! videoconvert"
+      "gst_input": "v4l2src device=/dev/video4 ! image/jpeg,width=1920,height=1080,framerate=60/1 ! jpegdec ! videoconvert"
     }
   ]
 }

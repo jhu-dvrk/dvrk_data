@@ -5,13 +5,13 @@ Convention
 ----------
 Every inter-process video socket follows the pattern::
 
-    @dvrk_gst:<role>:<name>
+    @dvrk:<role>:<name>
 
 The leading ``@`` is our notation for a Linux abstract-namespace socket.
 In GStreamer pipeline strings the ``@`` is stripped::
 
-    unixfdsink socket-path=dvrk_gst:<role>:<name> socket-type=abstract
-    unixfdsrc  socket-path=dvrk_gst:<role>:<name> socket-type=abstract
+    unixfdsink socket-path=dvrk:<role>:<name> socket-type=abstract
+    unixfdsrc  socket-path=dvrk:<role>:<name> socket-type=abstract
 
 Abstract sockets are not visible in the file system; they are automatically
 released by the kernel when the last file descriptor that references them is
@@ -26,20 +26,14 @@ Fixed roles
 ``stereo_display``
     Display app (produces ``stereo`` / ``overlay`` for downstream consumers).
 
-Short-name resolution in JSON
------------------------------
-JSON configs use a single ``"socket"`` field.  Three forms are accepted:
-
-``"left"``
-    → ``@dvrk_gst:<default_role>:left``
-``"stereo_alignment:stereo"``
-    → ``@dvrk_gst:stereo_alignment:stereo``
-``"@dvrk_gst:stereo_source:left"``
-    → used as-is
+Socket values in JSON
+---------------------
+JSON configs use ``"gst_input"`` and ``"gst_output"`` fields. Socket values
+must use the canonical ``"@dvrk:role:name"`` form.
 
 Discovery
 ---------
-:func:`list_sockets`  — returns all ``@dvrk_gst:*`` sockets currently in the kernel.
+:func:`list_sockets`  — returns all ``@dvrk:*`` sockets currently in the kernel.
 :func:`print_sockets` — pretty-prints the list.
 :func:`check_socket`  — verifies a socket exists; prints alternatives on failure.
 """
@@ -55,41 +49,36 @@ ROLE_STEREO_SOURCE    = "stereo_source"
 ROLE_STEREO_ALIGNMENT = "stereo_alignment"
 ROLE_STEREO_DISPLAY   = "stereo_display"
 
-PREFIX = "@dvrk_gst:"
+PREFIX = "@dvrk:"
 
 # ── Name construction ─────────────────────────────────────────────────────────
 
 def make(role: str, name: str) -> str:
-    """Return a fully-qualified abstract socket name ``@dvrk_gst:<role>:<name>``."""
+    """Return a fully-qualified abstract socket name ``@dvrk:<role>:<name>``."""
     return f"{PREFIX}{role}:{name}"
 
 
 # ── Resolution ────────────────────────────────────────────────────────────────
 
-def resolve(socket_field: str, default_role: str) -> str:
-    """Resolve a value from the JSON ``"socket"`` field to a fully-qualified
-    abstract socket name.
+def is_socket_reference(value: str) -> bool:
+    return bool(value) and value.startswith(PREFIX)
 
-    Accepted forms:
 
-    * ``"@dvrk_gst:role:name"`` — returned as-is.
-    * ``"role:name"``           — prefixed with ``@dvrk_gst:``.
-    * ``"name"``                — expanded to ``@dvrk_gst:<default_role>:name``.
+def resolve(socket_field: str, default_role: str = "") -> str:
+    """Resolve a canonical ``@dvrk:role:name`` socket reference.
 
     Parameters
     ----------
     socket_field:
-        Raw value from the JSON ``"socket"`` key.
+        Raw value from a JSON ``gst_input``/``gst_output`` key.
     default_role:
-        Role string used when *socket_field* contains only a short name.
+        Retained in the call signature for application-level role context.
     """
     if not socket_field:
         return ""
-    if socket_field.startswith(PREFIX):
-        return socket_field
-    if ":" in socket_field:
-        return PREFIX + socket_field
-    return make(default_role, socket_field)
+    if not is_socket_reference(socket_field):
+        return ""
+    return socket_field
 
 
 # ── GStreamer integration ─────────────────────────────────────────────────────
@@ -104,8 +93,8 @@ def build_sink(abstract_name: str, sync: bool = False) -> str:
 
     Parameters
     ----------
-    abstract_name:
-        Fully-qualified name, e.g. ``@dvrk_gst:stereo_source:left``.
+        abstract_name:
+        Fully-qualified name, e.g. ``@dvrk:stereo_source:left``.
     sync:
         Value for GStreamer's ``sync=`` property.
     """
@@ -123,7 +112,7 @@ def build_src(abstract_name: str, width: int = 0, height: int = 0,
     Parameters
     ----------
     abstract_name:
-        Fully-qualified name, e.g. ``@dvrk_gst:stereo_source:left``.
+        Fully-qualified name, e.g. ``@dvrk:stereo_source:left``.
     width:
         Caps filter width.  No caps filter added when ``width <= 0``.
     height:
@@ -140,15 +129,26 @@ def build_src(abstract_name: str, width: int = 0, height: int = 0,
     return s
 
 
+def build_input(gst_input: str, default_role: str, width: int = 0,
+                height: int = 0, fmt: str = "I420") -> str:
+    """Return a pipeline unchanged, or expand an @ socket reference to unixfdsrc."""
+    if not is_socket_reference(gst_input):
+        return gst_input
+    socket_name = resolve(gst_input, default_role)
+    if not socket_name:
+        return ""
+    return build_src(socket_name, width, height, fmt)
+
+
 # ── Discovery ─────────────────────────────────────────────────────────────────
 
 def list_sockets() -> list[str]:
-    """Return all ``@dvrk_gst:*`` abstract socket names currently registered in
+    """Return all ``@dvrk:*`` abstract socket names currently registered in
     the Linux kernel, by parsing ``/proc/net/unix``.
 
     Abstract sockets appear with their name prefixed by ``@`` in
     ``/proc/net/unix``.  Each returned string is in the form
-    ``@dvrk_gst:<role>:<name>``.
+    ``@dvrk:<role>:<name>``.
     """
     result: list[str] = []
     try:
@@ -175,7 +175,7 @@ def list_sockets() -> list[str]:
 
 
 def print_sockets(file=None) -> None:
-    """Print all existing ``@dvrk_gst`` sockets.
+    """Print all existing ``@dvrk`` sockets.
 
     Parameters
     ----------
@@ -186,9 +186,9 @@ def print_sockets(file=None) -> None:
         file = sys.stdout
     sockets = list_sockets()
     if not sockets:
-        print("No @dvrk_gst abstract sockets found.", file=file)
+        print("No @dvrk abstract sockets found.", file=file)
         return
-    print("Available @dvrk_gst sockets:", file=file)
+    print("Available @dvrk sockets:", file=file)
     for s in sockets:
         print(f"  {s}", file=file)
 
@@ -202,7 +202,7 @@ def check_socket(abstract_name: str, file=None) -> bool:
     Parameters
     ----------
     abstract_name:
-        Fully-qualified name to look for, e.g. ``@dvrk_gst:stereo_source:left``.
+        Fully-qualified name to look for, e.g. ``@dvrk:stereo_source:left``.
     file:
         Error output stream.  Defaults to ``sys.stderr``.
     """
@@ -213,9 +213,9 @@ def check_socket(abstract_name: str, file=None) -> bool:
         return True
     print(f"Socket not found: {abstract_name}", file=file)
     if not sockets:
-        print("No @dvrk_gst sockets are currently active.", file=file)
+        print("No @dvrk sockets are currently active.", file=file)
     else:
-        print("Available @dvrk_gst sockets:", file=file)
+        print("Available @dvrk sockets:", file=file)
         for s in sockets:
             print(f"  {s}", file=file)
     return False

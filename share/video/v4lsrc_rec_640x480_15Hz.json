@@ -3,7 +3,7 @@
   "videos": [
     {
       "name": "v4l_camera",
-      "stream": "v4l2src device=/dev/video4",
+      "gst_input": "v4l2src device=/dev/video4",
       "record": true
     }
   ]

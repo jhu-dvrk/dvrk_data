@@ -201,7 +201,7 @@ int main(int argc, char *argv[]) {
     }
 
     std::string stream = v4l_params;
-    // Add caps to stream field
+    // Add caps to gst_input field
     stream += " ! " + mode.caps_name + ",width=" + std::to_string(mode.width) + 
               ",height=" + std::to_string(mode.height) + 
               ",framerate=" + std::to_string(mode.fps_num) + "/" + std::to_string(mode.fps_den);
@@ -211,7 +211,7 @@ int main(int argc, char *argv[]) {
         stream += " ! jpegdec ! videoconvert";
     }
               
-    video["stream"] = stream;
+    video["gst_input"] = stream;
     video["record"] = true;
     
     Json::Value encoding;

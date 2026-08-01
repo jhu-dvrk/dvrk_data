@@ -9,8 +9,8 @@
 namespace sv {
 
 struct SourceConfig {
-    std::string source;  // raw GStreamer pipeline string
-    std::string socket;  // abstract socket name (@dvrk_gst:role:name); overrides source
+    std::string gst_input;   // pipeline text or an @ socket reference
+    std::string gst_output;  // optional @ socket reference
 };
 
 struct ColorAdjustment {
@@ -20,25 +20,12 @@ struct ColorAdjustment {
     double hue = 0.0;
 };
 
-// Single-field socket config.  The "socket" value may be:
-//   "name"                    short name, expanded with the caller's default role
-//   "role:name"               expanded to @dvrk_gst:role:name
-//   "@dvrk_gst:role:name"     used as-is
-// Use dvrk_gst::resolve(socket, default_role) to obtain the full abstract name.
-struct UnixfdSinkConfig {
-    std::string socket;
-};
-
-struct UnixfdSourceConfig {
-    std::string socket;
-};
-
 struct StereoExtraStream {
     std::string left;
     std::string right;
 };
 
-struct ExtraStreamsConfig {
+struct PipGstInputsConfig {
     std::vector<std::string> monos;
     std::vector<StereoExtraStream> stereos;
     // Fraction of eye height used by the extra streams (0.0–1.0). Default 0.3.
@@ -47,8 +34,8 @@ struct ExtraStreamsConfig {
 
 struct ARConfig {
     bool enabled = false;
-    std::string left;   // abstract socket for left AR overlay (@dvrk_gst:stereo_source:left_ar)
-    std::string right;  // abstract socket for right AR overlay (@dvrk_gst:stereo_source:right_ar)
+    SourceConfig left;
+    SourceConfig right;
     bool use_color_key = false;
     int color_key_r = 0;
     int color_key_g = 0;
@@ -76,9 +63,7 @@ struct AppConfig {
     bool preserve_size = true;
     std::vector<std::string> sinks;
     std::vector<std::string> sink_streams;
-    std::vector<UnixfdSinkConfig> unixfd_sinks;
-    std::vector<UnixfdSourceConfig> unixfd_sources;
-    ExtraStreamsConfig extra_streams;
+    PipGstInputsConfig pip_gst_inputs;
     ARConfig ar;
 };
 

@@ -1,19 +1,16 @@
 {
   "type": "dvrk_data:stereo_alignment@1.0.0",
   "name": "dvrk_test",
-  "unixfdsinks": [
-    {"socket": "stereo"}
-  ],
   "camera": {
     "size": {
       "width": 640,
       "height": 480
     },
     "left": {
-      "stream": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+      "gst_input": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
     },
     "right": {
-      "stream": "videotestsrc pattern=ball is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
+      "gst_input": "videotestsrc pattern=ball is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
     },
     "crop": {
       "width": 640,
@@ -23,5 +20,6 @@
       "horizontal_shift_px": 0,
       "vertical_shift_px": 0
     }
-  }
+  },
+  "gst_output": "@dvrk:stereo_alignment:stereo"
 }

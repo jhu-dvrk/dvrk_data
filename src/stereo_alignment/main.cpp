@@ -248,9 +248,7 @@ void add_probe(GstElement *pipeline, const std::string &element_name,
   gst_object_unref(element);
 }
 
-std::string build_pipeline_string(
-    const sv::AppConfig &cfg,
-    const std::vector<sv::UnixfdSinkConfig> &stereo_sinks) {
+std::string build_pipeline_string(const sv::AppConfig &cfg) {
   int base_crop_w = cfg.crop_width > 0 ? cfg.crop_width : cfg.original_width;
   int base_crop_h = cfg.crop_height > 0 ? cfg.crop_height : cfg.original_height;
   base_crop_w = normalize_eye_size_for_even_crop(cfg.original_width, base_crop_w);
@@ -316,7 +314,7 @@ std::string build_pipeline_string(
   }
 
   const std::string left_chain =
-      cfg.left.source +
+      cfg.left.gst_input +
       " ! queue name=__left_src_q__ max-size-buffers=3 max-size-time=0 "
       "max-size-bytes=0 leaky=downstream"
       " ! videobalance name=left_balance brightness=" + std::to_string(cfg.left_color.brightness) +
@@ -332,7 +330,7 @@ std::string build_pipeline_string(
       " ! __stereo_mix__.sink_0";
 
   const std::string right_chain =
-      cfg.right.source +
+      cfg.right.gst_input +
       " ! queue name=__right_src_q__ max-size-buffers=3 max-size-time=0 "
       "max-size-bytes=0 leaky=downstream"
       " ! videobalance name=right_balance brightness=" + std::to_string(cfg.right_color.brightness) +
@@ -359,22 +357,11 @@ std::string build_pipeline_string(
       " ! video/x-raw,format=I420,width=" + std::to_string(2 * eye_w) +
       ",height=" + std::to_string(eye_h);
 
-  std::string outputs;
-  if (stereo_sinks.size() > 1) {
-    outputs += " ! tee name=__stereo_out__ ";
-    for (std::size_t i = 0; i < stereo_sinks.size(); ++i) {
-      const std::string abstract_name =
-          dvrk_gst::resolve(stereo_sinks[i].socket, dvrk_gst::ROLE_STEREO_ALIGNMENT);
-      outputs += " __stereo_out__. ! queue name=__stereo_unixfd_ts_q" + std::to_string(i) +
-                 "__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-                 "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
-    }
-  } else if (stereo_sinks.size() == 1) {
-    const std::string abstract_name =
-        dvrk_gst::resolve(stereo_sinks[0].socket, dvrk_gst::ROLE_STEREO_ALIGNMENT);
-    outputs += " ! queue name=__stereo_unixfd_ts_q0__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-               "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
-  }
+  const std::string abstract_name = dvrk_gst::resolve(cfg.stereo.gst_output);
+  const std::string outputs =
+      " ! queue name=__stereo_output_q__ max-size-buffers=2 max-size-time=0 "
+      "max-size-bytes=0 leaky=downstream ! " +
+      dvrk_gst::build_sink(abstract_name);
 
   return left_chain + " " + right_chain + " " + output_chain + " " + outputs;
 }
@@ -423,33 +410,10 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (cfg.left.source.empty()) {
-    auto srcs = dc_stereo::collect_unixfd_sources(cfg, dvrk_gst::ROLE_STEREO_SOURCE, "left");
-    if (!srcs.empty()) {
-      const std::string abstract_name =
-          dvrk_gst::resolve(srcs[0].socket, dvrk_gst::ROLE_STEREO_SOURCE);
-      cfg.left.source =
-          dc_stereo::build_unixfdsrc_string(abstract_name, cfg.original_width,
-                                            cfg.original_height);
-      RCLCPP_INFO(node->get_logger(), "left unixfd source: %s", abstract_name.c_str());
-    }
-  }
-  if (cfg.right.source.empty()) {
-    auto srcs = dc_stereo::collect_unixfd_sources(cfg, dvrk_gst::ROLE_STEREO_SOURCE, "right");
-    if (!srcs.empty()) {
-      const std::string abstract_name =
-          dvrk_gst::resolve(srcs[0].socket, dvrk_gst::ROLE_STEREO_SOURCE);
-      cfg.right.source =
-          dc_stereo::build_unixfdsrc_string(abstract_name, cfg.original_width,
-                                            cfg.original_height);
-      RCLCPP_INFO(node->get_logger(), "right unixfd source: %s", abstract_name.c_str());
-    }
-  }
-
-  if (cfg.left.source.empty() || cfg.right.source.empty()) {
+  if (cfg.left.gst_input.empty() || cfg.right.gst_input.empty()) {
     RCLCPP_ERROR(node->get_logger(),
-                 "Config '%s' must define camera.left.stream and "
-                 "camera.right.stream",
+                 "Config '%s' must define camera.left.gst_input and "
+                 "camera.right.gst_input",
                  cfg.name.c_str());
     rclcpp::shutdown();
     return 1;
@@ -465,17 +429,26 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  auto stereo_sinks = dc_stereo::collect_unixfd_sinks(cfg, dvrk_gst::ROLE_STEREO_ALIGNMENT, "stereo");
-  dc_stereo::ensure_sink(stereo_sinks, "stereo");
-  dc_stereo::remove_stale_sockets(cfg.name, stereo_sinks, dvrk_gst::ROLE_STEREO_ALIGNMENT, node->get_logger());
-
-  for (const auto &sink : stereo_sinks) {
-    RCLCPP_INFO(node->get_logger(), "stereo unixfd sink: %s",
-                dvrk_gst::resolve(sink.socket, dvrk_gst::ROLE_STEREO_ALIGNMENT).c_str());
+  if (cfg.stereo.gst_output.empty())
+    cfg.stereo.gst_output = dvrk_gst::make(
+        dvrk_gst::ROLE_STEREO_ALIGNMENT, "stereo");
+  cfg.left.gst_input = dvrk_gst::build_input(
+      cfg.left.gst_input, dvrk_gst::ROLE_STEREO_SOURCE,
+      cfg.original_width, cfg.original_height);
+  cfg.right.gst_input = dvrk_gst::build_input(
+      cfg.right.gst_input, dvrk_gst::ROLE_STEREO_SOURCE,
+      cfg.original_width, cfg.original_height);
+  if (dvrk_gst::resolve(cfg.stereo.gst_output).empty()) {
+    RCLCPP_ERROR(node->get_logger(), "Invalid root gst_output: %s",
+                 cfg.stereo.gst_output.c_str());
+    rclcpp::shutdown();
+    return 1;
   }
+  RCLCPP_INFO(node->get_logger(), "stereo gst output: %s",
+              cfg.stereo.gst_output.c_str());
 
   const std::string pipeline_string =
-      build_pipeline_string(cfg, stereo_sinks);
+      build_pipeline_string(cfg);
   if (!dc_stereo::validate_pipeline(pipeline_string, node->get_logger(),
                                     "stereo_alignment")) {
     rclcpp::shutdown();
@@ -505,10 +478,8 @@ int main(int argc, char *argv[]) {
             &timestamp_state);
   add_probe(pipeline, "__right_src_q__", input_timestamp_probe_cb,
             &timestamp_state);
-  for (std::size_t i = 0; i < stereo_sinks.size(); ++i) {
-    add_probe(pipeline, "__stereo_unixfd_ts_q" + std::to_string(i) + "__",
-              output_timestamp_probe_cb, &timestamp_state);
-  }
+  add_probe(pipeline, "__stereo_output_q__", output_timestamp_probe_cb,
+            &timestamp_state);
 
   const int status = dc_stereo::run_pipeline(
       pipeline, node, "stereo_alignment",

@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-gscam_socket — launch gscam_node for a dvrk_gst abstract Unix socket.
+gscam_socket — launch gscam_node for a dVRK abstract Unix socket.
 
 Usage
 -----
-  gscam_socket                          # list available @dvrk_gst sockets
+  gscam_socket                          # list available @dvrk sockets
   gscam_socket <socket>                 # launch gscam for the given socket
 
 Socket forms accepted
 ---------------------
-  left                                  # short name → @dvrk_gst:stereo_source:left
-  stereo_alignment:stereo               # role:name   → @dvrk_gst:stereo_alignment:stereo
-  @dvrk_gst:stereo_display:overlay      # fully-qualified (used as-is)
+  @dvrk:stereo_source:left              # canonical dVRK socket
+  @dvrk:stereo_alignment:stereo         # canonical dVRK socket
 
 Optional arguments (passed through to gscam.launch.py)
 -------------------------------------------------------
@@ -30,12 +29,11 @@ import sys
 # the workspace to be sourced just for the discovery/resolve step).
 # ---------------------------------------------------------------------------
 
-_PREFIX = "@dvrk_gst:"
-_DEFAULT_ROLE = "stereo_source"
+_PREFIX = "@dvrk:"
 
 
 def _list_sockets():
-    """Return sorted, deduplicated list of active @dvrk_gst abstract sockets."""
+    """Return sorted, deduplicated list of active @dvrk abstract sockets."""
     result = []
     try:
         with open("/proc/net/unix") as f:
@@ -49,15 +47,13 @@ def _list_sockets():
     return sorted(set(result))
 
 
-def _resolve(socket_field: str, default_role: str = _DEFAULT_ROLE) -> str:
-    """Resolve any accepted socket form to a fully-qualified name."""
+def _resolve(socket_field: str) -> str:
+    """Accept only the canonical dVRK socket name."""
     if not socket_field:
         return ""
-    if socket_field.startswith(_PREFIX):
-        return socket_field
-    if ":" in socket_field:
-        return _PREFIX + socket_field
-    return f"{_PREFIX}{default_role}:{socket_field}"
+    if not socket_field.startswith(_PREFIX):
+        return ""
+    return socket_field
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +72,8 @@ def main():
         default=None,
         metavar="SOCKET",
         help=(
-            "Socket to read from. Accepts short name (e.g. 'left'), "
-            "role:name (e.g. 'stereo_alignment:stereo'), or fully-qualified "
-            "name (e.g. '@dvrk_gst:stereo_source:left'). "
-            f"Short names use the default role '{_DEFAULT_ROLE}'."
+            "Socket to read from in canonical form, e.g. "
+            "'@dvrk:stereo_source:left'."
         ),
     )
     parser.add_argument(
@@ -109,7 +103,7 @@ def main():
     if args.socket is None:
         sockets = _list_sockets()
         if not sockets:
-            print("No @dvrk_gst abstract sockets are currently active.", file=sys.stderr)
+            print("No @dvrk abstract sockets are currently active.", file=sys.stderr)
             print(
                 "\nMake sure stereo_source, stereo_alignment, or stereo_display "
                 "is running.",
@@ -117,7 +111,7 @@ def main():
             )
             sys.exit(1)
 
-        print("Available @dvrk_gst sockets:")
+        print("Available @dvrk sockets:")
         for i, s in enumerate(sockets, 1):
             print(f"  [{i}] {s}")
         print(f"\nUsage: gscam_socket <socket>")
@@ -129,14 +123,17 @@ def main():
 
     # ── Verify the socket is live ───────────────────────────────────────────
     active = _list_sockets()
+    if not fqn:
+        print("error: socket must use the canonical @dvrk:role:name form", file=sys.stderr)
+        sys.exit(1)
     if fqn not in active:
         print(f"error: socket not found: {fqn}", file=sys.stderr)
         if active:
-            print("Available @dvrk_gst sockets:", file=sys.stderr)
+            print("Available @dvrk sockets:", file=sys.stderr)
             for s in active:
                 print(f"  {s}", file=sys.stderr)
         else:
-            print("No @dvrk_gst sockets are currently active.", file=sys.stderr)
+            print("No @dvrk sockets are currently active.", file=sys.stderr)
         sys.exit(1)
 
     # ── Build ros2 launch command ───────────────────────────────────────────

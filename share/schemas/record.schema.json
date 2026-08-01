@@ -53,25 +53,16 @@
     }
   },
   "$defs": {
-    "socketName": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Socket in short-name, role:name, or @dvrk_gst:role:name form."
-    },
     "video": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name"],
+      "required": ["name", "gst_input"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
-        "socket": {
-          "$ref": "#/$defs/socketName",
-          "description": "unixfd input socket. When present, the recorder ignores stream."
-        },
-        "stream": {
+        "gst_input": {
           "type": "string",
           "minLength": 1,
-          "description": "GStreamer source fragment used when socket is absent."
+          "description": "GStreamer source pipeline or canonical @dvrk socket reference."
         },
         "record": { "type": "boolean", "default": true },
         "timestamp_overlay": { "type": "boolean", "default": false },
@@ -97,11 +88,7 @@
             "key_int_max": { "type": "integer", "minimum": 1, "default": 30 }
           }
         }
-      },
-      "anyOf": [
-        { "required": ["socket"] },
-        { "required": ["stream"] }
-      ]
+      }
     }
   }
 }

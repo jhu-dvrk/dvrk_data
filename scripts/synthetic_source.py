@@ -169,10 +169,10 @@ def main():
     parser = argparse.ArgumentParser(description="Synthetic unixfd stereo source with a ROS correlation topic")
     parser.add_argument("--left-socket",
                         default=dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "left"),
-                        help="Abstract socket name for left stream (default: @dvrk_gst:stereo_source:left)")
+                        help="Abstract socket name for left stream (default: @dvrk:stereo_source:left)")
     parser.add_argument("--right-socket",
                         default=dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "right"),
-                        help="Abstract socket name for right stream (default: @dvrk_gst:stereo_source:right)")
+                        help="Abstract socket name for right stream (default: @dvrk:stereo_source:right)")
     parser.add_argument("--correlation-topic", default="/dvrk_test/correlation")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)

@@ -8,15 +8,16 @@
   "properties": {
     "type": { "const": "dvrk_data:stereo_alignment@1.0.0" },
     "name": { "type": "string", "minLength": 1, "default": "dvrk_display" },
+    "gst_output": { "$ref": "#/$defs/gstOutput" },
     "preserve_size": { "type": "boolean", "default": true },
     "camera": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["size", "crop"],
+      "required": ["size", "left", "right", "crop"],
       "properties": {
         "size": { "$ref": "#/$defs/size" },
-        "left": { "$ref": "#/$defs/optionalCameraStream" },
-        "right": { "$ref": "#/$defs/optionalCameraStream" },
+        "left": { "$ref": "#/$defs/cameraEndpoint" },
+        "right": { "$ref": "#/$defs/cameraEndpoint" },
         "crop": { "$ref": "#/$defs/size" },
         "alignment": {
           "type": "object",
@@ -27,42 +28,8 @@
           }
         }
       }
-    },
-    "unixfdsources": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/socketEntry" },
-      "description": "Normally contains left and right sockets produced by stereo_source."
-    },
-    "unixfdsinks": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/socketEntry" },
-      "description": "Aligned stereo outputs. A default stereo sink is created when none is configured."
     }
   },
-  "anyOf": [
-    {
-      "properties": {
-        "camera": {
-          "required": ["left", "right"],
-          "properties": {
-            "left": { "required": ["stream"] },
-            "right": { "required": ["stream"] }
-          }
-        }
-      }
-    },
-    {
-      "required": ["unixfdsources"],
-      "properties": {
-        "unixfdsources": {
-          "allOf": [
-            { "contains": { "properties": { "socket": { "pattern": "(^|:)left$" } } } },
-            { "contains": { "properties": { "socket": { "pattern": "(^|:)right$" } } } }
-          ]
-        }
-      }
-    }
-  ],
   "$defs": {
     "size": {
       "type": "object",
@@ -83,21 +50,24 @@
         "hue": { "type": "number", "default": 0.0 }
       }
     },
-    "optionalCameraStream": {
+    "cameraEndpoint": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["gst_input"],
       "properties": {
-        "stream": { "type": "string", "minLength": 1 },
+        "gst_input": { "$ref": "#/$defs/gstInput" },
         "color": { "$ref": "#/$defs/color" }
       }
     },
-    "socketEntry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["socket"],
-      "properties": {
-        "socket": { "type": "string", "minLength": 1 }
-      }
+    "gstInput": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Plain GStreamer pipeline or canonical @dvrk:role:name socket reference."
+    },
+    "gstOutput": {
+      "type": "string",
+      "pattern": "^@dvrk:[^:]+:[^:]+$",
+      "description": "Canonical dVRK abstract socket reference."
     }
   }
 }
