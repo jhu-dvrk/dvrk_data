@@ -7,7 +7,7 @@
       "record": true,
       "timestamp_overlay": false,
       "encoding": {
-        "bitrate": 20000,
+        "bitrate_kbps": 20000,
         "frame_rate": 30
       }
     }

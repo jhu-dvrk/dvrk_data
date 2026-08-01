@@ -1,7 +1,7 @@
 #ifndef ROS_NODE_HPP
 #define ROS_NODE_HPP
 
-#include "context.hpp"
+#include "app_data.hpp"
 
 void ros_record_callback(const std_msgs::msg::Bool::SharedPtr msg, AppData* ad);
 void setup_ros_monitoring(AppData* ad);

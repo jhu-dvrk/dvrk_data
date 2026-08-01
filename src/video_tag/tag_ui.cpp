@@ -1249,8 +1249,12 @@ void TagWindow::load_session_tags() {
             std::string name = s["name"].asString();
             if (m_tag_buttons.count(name + "_start") == 0 || m_tag_buttons.count(name + "_end") == 0) continue;
 
-            long long start_ts = dc::parse_stage_timestamp(s["start"]);
-            long long end_ts = dc::parse_stage_timestamp(s["end"]);
+            if (!s["start"].isObject() || !s["start"].isMember("cpu_ts") ||
+                !s["end"].isObject() || !s["end"].isMember("cpu_ts")) {
+                continue;
+            }
+            long long start_ts = s["start"]["cpu_ts"].asInt64();
+            long long end_ts = s["end"]["cpu_ts"].asInt64();
 
             long long start_frame = find_frame(start_ts);
             long long end_frame = find_frame(end_ts);
@@ -1269,7 +1273,8 @@ void TagWindow::load_session_tags() {
         for (auto const& name : root["tags"].getMemberNames()) {
             if (m_tag_buttons.count(name) == 0) continue;
             for (auto& t : root["tags"][name]) {
-                long long tag_ts = dc::parse_stage_timestamp(t);
+                if (!t.isObject() || !t.isMember("cpu_ts")) continue;
+                long long tag_ts = t["cpu_ts"].asInt64();
                 long long frame = find_frame(tag_ts);
                 if (frame != -1) {
                     m_data.frame_tags[frame].push_back(name);

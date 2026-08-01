@@ -7,12 +7,8 @@
 #include "ui.hpp"
 #include "video_stream.hpp"
 
-// Since context.hpp only has forward decls, we need to include headers here
-// But wait, rosbag2_storage might not be included in ui.hpp either.
-// We should check what context.hpp modifications broke.
-// context.hpp has pointers to GtkWidget, GstElement.
-// ros_node.cpp needs to know the layout of AppData.
-// Compiling ros_node.cpp handles it because we include headers here.
+// Include the full application-data definition here because the callbacks
+// access its members.
 
 void ros_record_callback(const std_msgs::msg::Bool::SharedPtr msg, AppData* ad) {
     bool should_record = msg->data;

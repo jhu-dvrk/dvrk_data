@@ -8,7 +8,7 @@
       "side_by_side": "LR",
       "timestamp_overlay": true,
       "encoding": {
-        "bitrate": 30000,
+        "bitrate_kbps": 30000,
         "frame_rate": 30
       }
     }

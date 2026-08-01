@@ -2,7 +2,7 @@
 #define UI_HPP
 
 #include <gtkmm.h>
-#include "context.hpp"
+#include "app_data.hpp"
 
 // ---- Layout Constants ----
 #define WINDOW_BORDER_PX 8

@@ -1,5 +1,5 @@
 #include "video_stream.hpp"
-#include "context.hpp"
+#include "app_data.hpp"
 #include "gst_helpers.hpp"
 #include "ros_node.hpp"
 #include <dvrk_data/dvrk_gst_socket.hpp>

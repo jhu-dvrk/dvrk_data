@@ -3,7 +3,7 @@
   "videos": [
     {
       "encoding": {
-        "bitrate": 20000,
+        "bitrate_kbps": 20000,
         "frame_rate": 60,
         "height": 640,
         "width": 960
