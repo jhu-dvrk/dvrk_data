@@ -11,6 +11,7 @@ namespace sv {
 struct SourceConfig {
     std::string gst_input;   // pipeline text or an @ socket reference
     std::string gst_output;  // optional @ socket reference
+    bool gst_output_specified = false;  // distinguishes omitted from explicit ""
 };
 
 struct ColorAdjustment {

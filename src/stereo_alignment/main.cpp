@@ -357,11 +357,16 @@ std::string build_pipeline_string(const sv::AppConfig &cfg) {
       " ! video/x-raw,format=I420,width=" + std::to_string(2 * eye_w) +
       ",height=" + std::to_string(eye_h);
 
-  const std::string abstract_name = dvrk_gst::resolve(cfg.stereo.gst_output);
-  const std::string outputs =
-      " ! queue name=__stereo_output_q__ max-size-buffers=2 max-size-time=0 "
-      "max-size-bytes=0 leaky=downstream ! " +
-      dvrk_gst::build_sink(abstract_name);
+  std::string outputs;
+  if (cfg.stereo.gst_output.empty()) {
+    outputs = " ! fakesink sync=false";
+  } else {
+    const std::string abstract_name = dvrk_gst::resolve(cfg.stereo.gst_output);
+    outputs =
+        " ! queue name=__stereo_output_q__ max-size-buffers=2 max-size-time=0 "
+        "max-size-bytes=0 leaky=downstream ! " +
+        dvrk_gst::build_sink(abstract_name);
+  }
 
   return left_chain + " " + right_chain + " " + output_chain + " " + outputs;
 }
@@ -429,7 +434,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (cfg.stereo.gst_output.empty())
+  if (!cfg.stereo.gst_output_specified)
     cfg.stereo.gst_output = dvrk_gst::make(
         dvrk_gst::ROLE_STEREO_ALIGNMENT, "stereo");
   cfg.left.gst_input = dvrk_gst::build_input(
@@ -438,14 +443,19 @@ int main(int argc, char *argv[]) {
   cfg.right.gst_input = dvrk_gst::build_input(
       cfg.right.gst_input, dvrk_gst::ROLE_STEREO_SOURCE,
       cfg.original_width, cfg.original_height);
-  if (dvrk_gst::resolve(cfg.stereo.gst_output).empty()) {
+  if (!cfg.stereo.gst_output.empty() &&
+      dvrk_gst::resolve(cfg.stereo.gst_output).empty()) {
     RCLCPP_ERROR(node->get_logger(), "Invalid root gst_output: %s",
                  cfg.stereo.gst_output.c_str());
     rclcpp::shutdown();
     return 1;
   }
-  RCLCPP_INFO(node->get_logger(), "stereo gst output: %s",
-              cfg.stereo.gst_output.c_str());
+  if (cfg.stereo.gst_output.empty()) {
+    RCLCPP_INFO(node->get_logger(), "stereo gst output disabled");
+  } else {
+    RCLCPP_INFO(node->get_logger(), "stereo gst output: %s",
+                cfg.stereo.gst_output.c_str());
+  }
 
   const std::string pipeline_string =
       build_pipeline_string(cfg);

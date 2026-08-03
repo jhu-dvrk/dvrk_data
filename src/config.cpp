@@ -57,8 +57,10 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         if (!node.isObject()) return endpoint;
         if (node.isMember("gst_input") && node["gst_input"].isString())
             endpoint.gst_input = node["gst_input"].asString();
-        if (node.isMember("gst_output") && node["gst_output"].isString())
+        if (node.isMember("gst_output") && node["gst_output"].isString()) {
             endpoint.gst_output = node["gst_output"].asString();
+            endpoint.gst_output_specified = true;
+        }
         return endpoint;
     };
 
@@ -95,8 +97,10 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
 
     if (root.isMember("gst_input") && root["gst_input"].isString())
         cfg.stereo.gst_input = root["gst_input"].asString();
-    if (root.isMember("gst_output") && root["gst_output"].isString())
+    if (root.isMember("gst_output") && root["gst_output"].isString()) {
         cfg.stereo.gst_output = root["gst_output"].asString();
+        cfg.stereo.gst_output_specified = true;
+    }
     if (root.isMember("eye_size") && root["eye_size"].isObject()) {
         const Json::Value& sz = root["eye_size"];
         if (sz.isMember("width")) cfg.original_width = sz["width"].asInt();

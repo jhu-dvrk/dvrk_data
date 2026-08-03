@@ -103,11 +103,15 @@ std::string build_branch(const std::string &source,
       source + " ! queue name=" + queue_name +
       " max-size-buffers=3 max-size-time=0 max-size-bytes=0 leaky=downstream";
 
-  const std::string abstract_name = dvrk_gst::resolve(output);
-  branch += " ! videoconvert ! video/x-raw,format=I420"
-            " ! queue name=__" +
-            stream_name + "_output_q__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
-            "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
+  if (output.empty()) {
+    branch += " ! fakesink sync=false";
+  } else {
+    const std::string abstract_name = dvrk_gst::resolve(output);
+    branch += " ! videoconvert ! video/x-raw,format=I420"
+              " ! queue name=__" +
+              stream_name + "_output_q__ max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
+              "leaky=downstream ! " + dvrk_gst::build_sink(abstract_name);
+  }
   return branch;
 }
 
@@ -171,9 +175,9 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (cfg.left.gst_output.empty())
+  if (!cfg.left.gst_output_specified)
     cfg.left.gst_output = dvrk_gst::make(dvrk_gst::ROLE_STEREO_SOURCE, "left");
-  if (cfg.right.gst_output.empty())
+  if (!cfg.right.gst_output_specified)
     cfg.right.gst_output = dvrk_gst::make(dvrk_gst::ROLE_STEREO_SOURCE, "right");
 
   cfg.left.gst_input = dvrk_gst::build_input(
@@ -184,6 +188,9 @@ int main(int argc, char *argv[]) {
       cfg.original_width, cfg.original_height);
 
   for (const auto &output : {cfg.left.gst_output, cfg.right.gst_output}) {
+    if (output.empty()) {
+      continue;
+    }
     if (dvrk_gst::resolve(output).empty()) {
       RCLCPP_ERROR(node->get_logger(), "Invalid gst_output socket reference: %s",
                    output.c_str());

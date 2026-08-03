@@ -66,7 +66,10 @@
     },
     "gstOutput": {
       "type": "string",
-      "pattern": "^@dvrk:[^:]+:[^:]+$",
+      "anyOf": [
+        { "const": "" },
+        { "pattern": "^@dvrk:[^:]+:[^:]+$" }
+      ],
       "description": "Canonical dVRK abstract socket reference."
     }
   }
