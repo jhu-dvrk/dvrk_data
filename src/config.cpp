@@ -5,7 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 
-namespace sv {
+namespace dvrk_data {
 
 bool Config::load_from_file(const std::string& path, Json::Value& root) {
     std::ifstream ifs(path);
@@ -212,4 +212,4 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     return cfg;
 }
 
-}  // namespace sv
+}  // namespace dvrk_data

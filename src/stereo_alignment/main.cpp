@@ -248,7 +248,7 @@ void add_probe(GstElement *pipeline, const std::string &element_name,
   gst_object_unref(element);
 }
 
-std::string build_pipeline_string(const sv::AppConfig &cfg) {
+std::string build_pipeline_string(const dvrk_data::AppConfig &cfg) {
   int base_crop_w = cfg.crop_width > 0 ? cfg.crop_width : cfg.original_width;
   int base_crop_h = cfg.crop_height > 0 ? cfg.crop_height : cfg.original_height;
   base_crop_w = normalize_eye_size_for_even_crop(cfg.original_width, base_crop_w);
@@ -395,20 +395,20 @@ int main(int argc, char *argv[]) {
   }
 
   Json::Value root;
-  if (!sv::Config::load_from_file(path, root)) {
+  if (!dvrk_data::Config::load_from_file(path, root)) {
     rclcpp::shutdown();
     return 1;
   }
 
-  if (!sv::Config::check_type(root, "dvrk_data:stereo_alignment@1.0.0",
+  if (!dvrk_data::Config::check_type(root, "dvrk_data:stereo_alignment@1.0.0",
                               path)) {
     rclcpp::shutdown();
     return 1;
   }
 
-  sv::AppConfig cfg;
+  dvrk_data::AppConfig cfg;
   try {
-    cfg = sv::Config::parse_app_config(root);
+    cfg = dvrk_data::Config::parse_app_config(root);
   } catch (const std::exception &e) {
     RCLCPP_ERROR(node->get_logger(), "%s", e.what());
     rclcpp::shutdown();

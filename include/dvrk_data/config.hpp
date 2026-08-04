@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace sv {
+namespace dvrk_data {
 
 struct SourceConfig {
     std::string gst_input;   // pipeline text or an @ socket reference
@@ -75,6 +75,6 @@ public:
     static AppConfig parse_app_config(const Json::Value& root);
 };
 
-}  // namespace sv
+}  // namespace dvrk_data
 
 #endif

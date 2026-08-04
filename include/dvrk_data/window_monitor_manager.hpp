@@ -14,7 +14,7 @@
 #include <algorithm>
 #include <cctype>
 
-namespace sv {
+namespace dvrk_data {
 
 class WindowMonitorManager {
 public:
@@ -243,6 +243,6 @@ private:
     bool m_fullscreen = false;
 };
 
-} // namespace sv
+} // namespace dvrk_data
 
 #endif // DVRK_DATA_WINDOW_MONITOR_MANAGER_HPP
