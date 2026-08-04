@@ -17,21 +17,19 @@
   <depend>rosbag2_cpp</depend>
 
   <build_depend>pkg-config</build_depend>
-  <build_depend>gstreamer-1.0</build_depend>
-  <build_depend>gstreamer-video-1.0</build_depend>
-  <build_depend>gstreamer-app-1.0</build_depend>
-  <build_depend>gtk+-3.0</build_depend>
-  <build_depend>gtkmm-3.0</build_depend>
+  <build_depend>libgstreamer1.0-dev</build_depend>
+  <build_depend>libgstreamer-plugins-base1.0-dev</build_depend>
+  <build_depend>gtk3</build_depend>
+  <build_depend>libgtkmm3.0-dev</build_depend>
   <build_depend>libjsoncpp-dev</build_depend>
 
   <exec_depend>python3-cairo</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>gstreamer-1.0</exec_depend>
-  <exec_depend>gstreamer-video-1.0</exec_depend>
-  <exec_depend>gstreamer-app-1.0</exec_depend>
-  <exec_depend>gtk+-3.0</exec_depend>
-  <exec_depend>gtkmm-3.0</exec_depend>
+  <exec_depend>libgstreamer1.0-dev</exec_depend>
+  <exec_depend>libgstreamer-plugins-base1.0-dev</exec_depend>
+  <exec_depend>gtk3</exec_depend>
+  <exec_depend>libgtkmm3.0-dev</exec_depend>
   <exec_depend>libjsoncpp-dev</exec_depend>
   <exec_depend>gscam</exec_depend>
   <exec_depend>launch_ros</exec_depend>
