@@ -1,22 +1,21 @@
 {
   "type": "dvrk_data:record@1.0.0",
-    "videos": [
-	{
-	    "name": "left",
-	    "gst_input": "v4l2src device=/dev/video0 ! videoconvert",
-	    "record": true,
-	    "encoding": {
-		"bitrate_kbps": 20000
-	    }
-	},
-	{
-	    "name": "right",
-	    "gst_input": "v4l2src device=/dev/video2 ! videoconvert",
-	    "record": true,
-	    "encoding": {
-		"bitrate_kbps": 20000
-	    }
-	}
-	
-    ]
+  "videos": [
+    {
+      "name": "left",
+      "gst_input": "v4l2src device=/dev/video0 ! videoconvert",
+      "record": true,
+      "encoding": {
+        "bitrate_kbps": 20000
+      }
+    },
+    {
+      "name": "right",
+      "gst_input": "v4l2src device=/dev/video2 ! videoconvert",
+      "record": true,
+      "encoding": {
+        "bitrate_kbps": 20000
+      }
+    }
+  ]
 }

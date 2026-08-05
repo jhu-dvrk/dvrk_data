@@ -2,10 +2,6 @@
   "type": "dvrk_data:record@1.0.0",
   "ros_topics": [
     {
-      "name": "/SUJ/joint_states",
-      "continuous": true
-    },
-    {
       "name": "/SUJ/PSM1/measured_js",
       "continuous": true
     },

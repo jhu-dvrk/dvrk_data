@@ -1,7 +1,7 @@
 {
   "type": "dvrk_data:record@1.0.0",
   "data_directory": "data",
-    "configuration_files": [
+  "configuration_files": [
     "video/decklink_stereo_gooviz_1920_540.json",
     "dVRK/console.json",
     "dVRK/MTML.json",

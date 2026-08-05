@@ -3,9 +3,10 @@
   "videos": [
     {
       "name": "stereo1",
-      "gst_input": "videotestsrc pattern=ball ! capsfilter caps=video/x-raw,width=320,height=240 ! mix.sink_0 videotestsrc pattern=smpte ! capsfilter caps=video/x-raw,width=320,height=240 ! mix.sink_1 compositor name=mix sink_0::xpos=0 sink_1::xpos=320 ! capsfilter caps=video/x-raw,width=640,height=240",
+      "gst_input": "videotestsrc pattern=ball is-live=true ! capsfilter caps=video/x-raw,width=320,height=240,framerate=15/1 ! mix.sink_0 videotestsrc pattern=smpte is-live=true ! capsfilter caps=video/x-raw,width=320,height=240,framerate=15/1 ! mix.sink_1 compositor name=mix sink_0::xpos=0 sink_1::xpos=320 ! capsfilter caps=video/x-raw,width=640,height=240,framerate=15/1",
       "record": true,
       "timestamp_overlay": true,
+      "side_by_side": "LR",
       "encoding": {
         "bitrate_kbps": 500000,
         "speed_preset": 7,
