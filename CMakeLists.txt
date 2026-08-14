@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.8)
-project(dvrk_data)
+cmake_minimum_required(VERSION 3.16)
+project(dvrk_data VERSION 1.0.0)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
