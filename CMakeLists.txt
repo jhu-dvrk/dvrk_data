@@ -42,8 +42,8 @@ target_link_libraries(dvrk_data
   ${JSONCPP_LIBRARIES}
   ${GST_LIBRARIES}
 )
-ament_target_dependencies(dvrk_data
-  ament_index_cpp
+target_link_libraries(dvrk_data
+  ament_index_cpp::ament_index_cpp
 )
 
 add_executable(record
@@ -55,10 +55,10 @@ add_executable(record
   src/record/ui.cpp
   src/record/ros_node.cpp
 )
-ament_target_dependencies(record
-  rclcpp
-  std_msgs
-  rosbag2_cpp
+target_link_libraries(record
+  rclcpp::rclcpp
+  std_msgs::std_msgs
+  rosbag2_cpp::rosbag2_cpp
 )
 target_include_directories(record PRIVATE
   ${GST_INCLUDE_DIRS}
@@ -114,8 +114,8 @@ target_link_libraries(video_latency
 add_executable(stereo_source
   src/stereo_source/main.cpp
 )
-ament_target_dependencies(stereo_source
-  rclcpp
+target_link_libraries(stereo_source
+  rclcpp::rclcpp
 )
 target_include_directories(stereo_source PRIVATE
   ${GST_INCLUDE_DIRS}
@@ -134,8 +134,8 @@ target_link_libraries(stereo_source
 add_executable(stereo_alignment
   src/stereo_alignment/main.cpp
 )
-ament_target_dependencies(stereo_alignment
-  rclcpp
+target_link_libraries(stereo_alignment
+  rclcpp::rclcpp
 )
 target_include_directories(stereo_alignment PRIVATE
   ${GST_INCLUDE_DIRS}
