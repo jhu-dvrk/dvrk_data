@@ -5,7 +5,7 @@
 #include <climits>
 #include <cstdlib>
 #include <unistd.h>
-#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <ament_index_cpp/get_package_share_path.hpp>
 
 namespace dc {
 
@@ -132,7 +132,7 @@ bool Config::load_recursive(const std::string& path,
     // Determine share directory using ROS2 API
     std::string share_dir = "";
     try {
-        share_dir = ament_index_cpp::get_package_share_directory("dvrk_data");
+        share_dir = ament_index_cpp::get_package_share_path("dvrk_data").string();
     } catch (const std::exception& e) {
         // Fallback or ignore if not in a ROS workspace
     }

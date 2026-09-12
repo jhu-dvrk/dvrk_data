@@ -155,9 +155,3 @@ void setup_ros_monitoring(AppData* ad) {
         ad->timers.push_back(timer);
     }
 }
-
-void ros_node_spin_once(AppData* ad) {
-    if (ad && ad->node) {
-        rclcpp::spin_some(ad->node);
-    }
-}

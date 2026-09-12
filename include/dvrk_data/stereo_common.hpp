@@ -74,6 +74,20 @@ struct PipelineUserData {
   PipelineReconnector reconnector;
 };
 
+struct RosSpinContext {
+  explicit RosSpinContext(const std::shared_ptr<rclcpp::Node> &ros_node)
+      : node(ros_node) {
+    executor.add_node(node);
+  }
+
+  ~RosSpinContext() {
+    executor.remove_node(node);
+  }
+
+  std::shared_ptr<rclcpp::Node> node;
+  rclcpp::executors::SingleThreadedExecutor executor;
+};
+
 inline void warn_if_interlaced_stream(const std::string &stream,
                                       const rclcpp::Logger &logger,
                                       const std::string &name) {
@@ -172,8 +186,8 @@ inline gboolean on_ros_spin(gpointer user_data) {
     return G_SOURCE_CONTINUE;
   }
 
-  auto *node = static_cast<rclcpp::Node *>(user_data);
-  rclcpp::spin_some(node->get_node_base_interface());
+  auto *spin_context = static_cast<RosSpinContext *>(user_data);
+  spin_context->executor.spin_some();
   return G_SOURCE_CONTINUE;
 }
 
@@ -247,6 +261,7 @@ inline int run_pipeline(GstElement *pipeline,
   PipelineUserData user_data;
   user_data.node = node.get();
   user_data.reconnector.start(pipeline, node.get(), pipeline_name);
+  RosSpinContext spin_context(node);
 
   GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
   gst_bus_add_watch(bus, on_bus_message, &user_data);
@@ -254,7 +269,7 @@ inline int run_pipeline(GstElement *pipeline,
 
   g_unix_signal_add(SIGINT, on_sigint, nullptr);
   g_unix_signal_add(SIGTERM, on_sigint, nullptr);
-  g_timeout_add(20, on_ros_spin, node.get());
+  const guint ros_spin_timer = g_timeout_add(20, on_ros_spin, &spin_context);
 
   g_main_loop = g_main_loop_new(nullptr, FALSE);
   gst_element_set_state(pipeline, GST_STATE_PLAYING);
@@ -262,6 +277,7 @@ inline int run_pipeline(GstElement *pipeline,
   g_main_loop_run(g_main_loop);
 
   user_data.reconnector.stop();
+  g_source_remove(ros_spin_timer);
 
   g_main_loop_unref(g_main_loop);
   g_main_loop = nullptr;
