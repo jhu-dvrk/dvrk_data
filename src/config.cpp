@@ -82,11 +82,13 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
             if (!item.isString()) continue;
             const std::string sink_type = item.asString();
             cfg.sinks.push_back(sink_type);
-            if (sink_type == "glimage") {
+            if (sink_type == "side_by_side" || sink_type == "glimage") {
                 cfg.sink_streams.push_back("glimagesink sync=false force-aspect-ratio=false");
-            } else if (sink_type == "glimages") {
+            } else if (sink_type == "separate" || sink_type == "glimages") {
                 cfg.sink_streams.push_back("glimagesink sync=false force-aspect-ratio=false");
                 cfg.sink_streams.push_back("glimagesink sync=false force-aspect-ratio=false");
+            } else if (sink_type == "headless") {
+                // Headless side-by-side: no GTK display sink streams
             }
         }
     }

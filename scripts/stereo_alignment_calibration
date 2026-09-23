@@ -692,7 +692,9 @@ def main():
     apply_stream_overrides(config, args)
 
     try:
-        split_mode = args.split or "glimages" in config.get("sinks", [])
+        split_mode = args.split or any(
+            s in config.get("sinks", []) for s in ("separate", "glimages")
+        )
         runtime_values = interactive_tune(config, split_mode=split_mode)
     except RuntimeError as exc:
         print(f"Error: {exc}")

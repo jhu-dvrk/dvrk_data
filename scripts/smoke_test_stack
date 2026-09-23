@@ -168,7 +168,7 @@ def build_alignment_config(path, sockets):
 
 
 def build_stereo_config(path, sockets, display_enabled):
-    sinks = ["glimage"] if display_enabled else []
+    sinks = ["side_by_side"] if display_enabled else ["headless"]
     write_json(
         path,
         {
