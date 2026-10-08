@@ -103,13 +103,21 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         cfg.stereo.gst_output = root["gst_output"].asString();
         cfg.stereo.gst_output_specified = true;
     }
-    if (root.isMember("eye_size") && root["eye_size"].isObject()) {
+    if (root.isMember("eye_size") && root["eye_size"].isString()) {
+        if (root["eye_size"].asString() != "auto")
+            throw std::runtime_error("Configuration error: 'eye_size' must be 'auto' or an object with width and height.");
+        cfg.auto_eye_size = true;
+    } else if (root.isMember("eye_size") && root["eye_size"].isObject()) {
         const Json::Value& sz = root["eye_size"];
         if (sz.isMember("width")) cfg.original_width = sz["width"].asInt();
         if (sz.isMember("height")) cfg.original_height = sz["height"].asInt();
     }
 
-    if (cam.isMember("size") && cam["size"].isObject()) {
+    if (cam.isMember("size") && cam["size"].isString()) {
+        if (cam["size"].asString() != "auto")
+            throw std::runtime_error("Configuration error: 'camera.size' must be 'auto' or an object with width and height.");
+        cfg.auto_camera_size = true;
+    } else if (cam.isMember("size") && cam["size"].isObject()) {
         const Json::Value& sz = cam["size"];
         if (!sz.isMember("width") || !sz.isMember("height"))
             throw std::runtime_error("Configuration error: 'camera.size' must define both 'width' and 'height'.");

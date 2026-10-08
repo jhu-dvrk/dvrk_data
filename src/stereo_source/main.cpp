@@ -9,6 +9,9 @@
 #include <dvrk_data/cpu_timestamp_meta.hpp>
 #include <dvrk_data/dvrk_gst_socket.hpp>
 #include <dvrk_data/stereo_common.hpp>
+#include <dvrk_data/video_caps.hpp>
+
+#include <atomic>
 
 namespace {
 
@@ -182,10 +185,12 @@ int main(int argc, char *argv[]) {
 
   cfg.left.gst_input = dvrk_gst::build_input(
       cfg.left.gst_input, dvrk_gst::ROLE_STEREO_SOURCE,
-      cfg.original_width, cfg.original_height);
+      cfg.auto_camera_size ? 0 : cfg.original_width,
+      cfg.auto_camera_size ? 0 : cfg.original_height);
   cfg.right.gst_input = dvrk_gst::build_input(
       cfg.right.gst_input, dvrk_gst::ROLE_STEREO_SOURCE,
-      cfg.original_width, cfg.original_height);
+      cfg.auto_camera_size ? 0 : cfg.original_width,
+      cfg.auto_camera_size ? 0 : cfg.original_height);
 
   for (const auto &output : {cfg.left.gst_output, cfg.right.gst_output}) {
     if (output.empty()) {
@@ -235,10 +240,41 @@ int main(int argc, char *argv[]) {
   add_timestamp_probe(pipeline, "__left_src_q__", 0);
   add_timestamp_probe(pipeline, "__right_src_q__", 1);
 
+  std::atomic_bool video_caps_failed{false};
+  auto make_monitor = [&](const char *side) {
+    dvrk_video::CapsMonitor monitor;
+    monitor.label = std::string("stereo_source ") + side + " input";
+    if (!cfg.auto_camera_size) {
+      monitor.expected = {cfg.original_width, cfg.original_height};
+    }
+    monitor.on_first = [&, side](dvrk_video::Size size) {
+      RCLCPP_INFO(node->get_logger(), "%s input negotiated %s", side,
+                  dvrk_video::describe(size).c_str());
+    };
+    monitor.on_error = [&](const std::string &message) {
+      video_caps_failed = true;
+      RCLCPP_ERROR(node->get_logger(), "%s", message.c_str());
+      g_main_context_invoke(nullptr, [](gpointer) -> gboolean {
+        if (dc_stereo::g_main_loop) g_main_loop_quit(dc_stereo::g_main_loop);
+        return G_SOURCE_REMOVE;
+      }, nullptr);
+    };
+    return monitor;
+  };
+  auto left_caps = make_monitor("left");
+  auto right_caps = make_monitor("right");
+  if (!dvrk_video::add_caps_monitor(pipeline, "__left_src_q__", &left_caps) ||
+      !dvrk_video::add_caps_monitor(pipeline, "__right_src_q__", &right_caps)) {
+    RCLCPP_ERROR(node->get_logger(), "Cannot monitor stereo source input caps");
+    gst_object_unref(pipeline);
+    rclcpp::shutdown();
+    return 1;
+  }
+
   const int status = dc_stereo::run_pipeline(
       pipeline, node, "stereo_source",
       "Stereo source background pipeline started");
   gst_object_unref(pipeline);
   rclcpp::shutdown();
-  return status;
+  return video_caps_failed ? 1 : status;
 }

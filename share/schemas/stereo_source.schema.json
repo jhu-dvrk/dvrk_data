@@ -13,7 +13,10 @@
       "additionalProperties": false,
       "required": ["left", "right"],
       "properties": {
-        "size": { "$ref": "#/$defs/size" },
+        "size": {
+          "description": "Use 'auto' to pass through each camera's negotiated dimensions, or specify a fixed expected input size.",
+          "oneOf": [{ "const": "auto" }, { "$ref": "#/$defs/size" }]
+        },
         "left": { "$ref": "#/$defs/sourceEndpoint" },
         "right": { "$ref": "#/$defs/sourceEndpoint" }
       }

@@ -56,6 +56,8 @@ struct AppConfig {
     ColorAdjustment right_color;
     int original_width = 0;
     int original_height = 0;
+    bool auto_eye_size = false;
+    bool auto_camera_size = false;
     int crop_width = 0;
     int crop_height = 0;
     int horizontal_shift_px = 0;

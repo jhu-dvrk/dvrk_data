@@ -15,7 +15,10 @@
       "additionalProperties": false,
       "required": ["size", "left", "right", "crop"],
       "properties": {
-        "size": { "$ref": "#/$defs/size" },
+        "size": {
+          "description": "Camera size used for pixel-based crop and shift calibration; incoming caps must match.",
+          "$ref": "#/$defs/size"
+        },
         "left": { "$ref": "#/$defs/cameraEndpoint" },
         "right": { "$ref": "#/$defs/cameraEndpoint" },
         "crop": { "$ref": "#/$defs/size" },
