@@ -392,7 +392,10 @@ def update_config_from_runtime(config, left, right, original_w, original_h, crop
     config.setdefault("preserve_size", True)
 
     cam = config.setdefault("camera", {})
-    cam["size"] = {"width": int(original_w), "height": int(original_h)}
+    cam["size"] = (
+        "auto" if any("@dvrk:" in stream or "unixfdsrc" in stream for stream in (left, right))
+        else {"width": int(original_w), "height": int(original_h)}
+    )
     
     # Store source streams if they were override args, or if they were already there
     if "left" not in cam:
@@ -423,6 +426,8 @@ def interactive_tune(config, split_mode=False):
 
     # Get camera dimensions from config
     cam_size = cam_cfg.get("size", {})
+    if cam_size == "auto":
+        cam_size = {}
     original_w = int(cam_size.get("width", 0))
     original_h = int(cam_size.get("height", 0))
 

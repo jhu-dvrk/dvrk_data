@@ -46,6 +46,7 @@ Alignment consumes those endpoints and publishes one stereo endpoint:
 ```json
 {
   "camera": {
+    "size": "auto",
     "left": {"gst_input": "@dvrk:stereo_source:left"},
     "right": {"gst_input": "@dvrk:stereo_source:right"}
   },
@@ -58,7 +59,7 @@ Display accepts either a pipeline or socket input:
 ```json
 {
   "gst_input": "@dvrk:stereo_alignment:stereo",
-  "eye_size": {"width": 1920, "height": 1080},
+  "eye_size": "auto",
   "gst_output": "@dvrk:stereo_display:stereo"
 }
 ```
@@ -67,6 +68,11 @@ The source and alignment executables calculate their standard output names
 when `gst_output` is omitted. Display output is optional. `pip_gst_inputs`
 replaces the old extra-stream setting and uses nested `gst_input` objects for
 monoscopic and stereo picture-in-picture streams.
+
+Socket consumers use `"auto"` for input sizes so the producer's negotiated
+dimensions determine the image size. Avoid width and height capsfilters on
+socket inputs; configure resolution at the producer instead. Crop dimensions
+and display offsets remain explicit calibration settings.
 
 ## GStreamer and discovery
 
