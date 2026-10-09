@@ -16,8 +16,8 @@
       "required": ["size", "left", "right", "crop"],
       "properties": {
         "size": {
-          "description": "Camera size used for pixel-based crop and shift calibration; incoming caps must match.",
-          "$ref": "#/$defs/size"
+          "description": "Use 'auto' to detect incoming camera caps, or specify a fixed size for pixel-based crop and shift calibration.",
+          "oneOf": [{ "const": "auto" }, { "$ref": "#/$defs/size" }]
         },
         "left": { "$ref": "#/$defs/cameraEndpoint" },
         "right": { "$ref": "#/$defs/cameraEndpoint" },
