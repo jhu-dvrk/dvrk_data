@@ -427,11 +427,12 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (cfg.original_width <= 0 || cfg.original_height <= 0 ||
+  if ((!cfg.auto_camera_size &&
+       (cfg.original_width <= 0 || cfg.original_height <= 0)) ||
       cfg.crop_width <= 0 || cfg.crop_height <= 0) {
     RCLCPP_ERROR(node->get_logger(),
-                 "Config '%s' must provide positive camera.size and crop "
-                 "dimensions",
+                 "Config '%s' must provide camera.size as auto or positive dimensions, "
+                 "and positive crop dimensions",
                  cfg.name.c_str());
     rclcpp::shutdown();
     return 1;
@@ -445,7 +446,7 @@ int main(int argc, char *argv[]) {
   cfg.right.gst_input = dvrk_gst::build_input(
       cfg.right.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
 
-  const dvrk_video::Size calibrated_size{cfg.original_width, cfg.original_height};
+  dvrk_video::Size calibrated_size{cfg.original_width, cfg.original_height};
   for (const auto &input : {std::pair<const char *, std::string>{"left", cfg.left.gst_input},
                             {"right", cfg.right.gst_input}}) {
     RCLCPP_INFO(node->get_logger(), "Waiting for %s camera dimensions", input.first);
@@ -460,6 +461,11 @@ int main(int argc, char *argv[]) {
     }
     RCLCPP_INFO(node->get_logger(), "%s camera negotiated %s", input.first,
                 dvrk_video::describe(result.size).c_str());
+    if (cfg.auto_camera_size && calibrated_size.width == 0) {
+      calibrated_size = result.size;
+      cfg.original_width = result.size.width;
+      cfg.original_height = result.size.height;
+    }
     if (result.size != calibrated_size) {
       RCLCPP_ERROR(node->get_logger(),
                    "%s camera is %s, calibration expects %s; update camera.size, crop, and shifts before restarting stereo_alignment",
