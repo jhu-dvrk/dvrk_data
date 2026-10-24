@@ -15,6 +15,7 @@
 
 #include <dvrk_data/config.hpp>
 #include <dvrk_data/cpu_timestamp_meta.hpp>
+#include <dvrk_data/stereo_timestamp_meta.hpp>
 #include <dvrk_data/dvrk_gst_socket.hpp>
 #include <dvrk_data/stereo_common.hpp>
 #include <dvrk_data/video_caps.hpp>
@@ -30,12 +31,6 @@ struct CropValues {
   int right = 0;
   int top = 0;
   int bottom = 0;
-};
-
-struct FrameTimestampState {
-  std::mutex mutex;
-  gint64 left_source_ts = 0;
-  gint64 right_source_ts = 0;
 };
 
 void print_usage(const char *executable) {
@@ -166,10 +161,7 @@ GstPadProbeReturn input_timestamp_probe_cb(GstPad *pad,
     GST_PAD_PROBE_INFO_DATA(info) = buf;
   }
 
-  auto *state = static_cast<FrameTimestampState *>(user_data);
-  if (state == nullptr) {
-    return GST_PAD_PROBE_OK;
-  }
+  (void)user_data;
 
   std::string element_name;
   GstElement *parent = gst_pad_get_parent_element(pad);
@@ -184,59 +176,26 @@ GstPadProbeReturn input_timestamp_probe_cb(GstPad *pad,
   DcFrameTimestamps timestamps = dc_buffer_get_frame_timestamps(buf);
   const gint64 now = dc_clock_realtime_ns();
 
-  std::scoped_lock<std::mutex> lock(state->mutex);
   if (element_name == "__left_src_q__") {
     if (timestamps.left_source_ts == 0) {
       timestamps.left_source_ts = now;
     }
-    state->left_source_ts = timestamps.left_source_ts;
+    if (timestamps.left_reference_timestamps.empty())
+      timestamps.left_reference_timestamps = dc_buffer_get_reference_timestamps(buf);
   } else if (element_name == "__right_src_q__") {
     if (timestamps.right_source_ts == 0) {
       timestamps.right_source_ts = now;
     }
-    state->right_source_ts = timestamps.right_source_ts;
+    if (timestamps.right_reference_timestamps.empty())
+      timestamps.right_reference_timestamps = dc_buffer_get_reference_timestamps(buf);
   }
 
-  dc_buffer_set_frame_timestamps(buf, timestamps);
-  return GST_PAD_PROBE_OK;
-}
-
-GstPadProbeReturn output_timestamp_probe_cb(GstPad *pad,
-                                            GstPadProbeInfo *info,
-                                            gpointer user_data) {
-  (void)pad;
-  if (!(info->type & GST_PAD_PROBE_TYPE_BUFFER)) {
-    return GST_PAD_PROBE_OK;
-  }
-
-  GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
-  if (!gst_buffer_is_writable(buf)) {
-    buf = gst_buffer_make_writable(buf);
-    GST_PAD_PROBE_INFO_DATA(info) = buf;
-  }
-
-  auto *state = static_cast<FrameTimestampState *>(user_data);
-  if (state == nullptr) {
-    return GST_PAD_PROBE_OK;
-  }
-
-  DcFrameTimestamps timestamps = dc_buffer_get_frame_timestamps(buf);
-  {
-    std::scoped_lock<std::mutex> lock(state->mutex);
-    if (timestamps.left_source_ts == 0) {
-      timestamps.left_source_ts = state->left_source_ts;
-    }
-    if (timestamps.right_source_ts == 0) {
-      timestamps.right_source_ts = state->right_source_ts;
-    }
-  }
-  timestamps.stereo_output_ts = dc_clock_realtime_ns();
   dc_buffer_set_frame_timestamps(buf, timestamps);
   return GST_PAD_PROBE_OK;
 }
 
 void add_probe(GstElement *pipeline, const std::string &element_name,
-               GstPadProbeCallback callback, FrameTimestampState *state) {
+               GstPadProbeCallback callback) {
   GstElement *element =
       gst_bin_get_by_name(GST_BIN(pipeline), element_name.c_str());
   if (element == nullptr) {
@@ -245,7 +204,7 @@ void add_probe(GstElement *pipeline, const std::string &element_name,
 
   GstPad *pad = gst_element_get_static_pad(element, "src");
   if (pad != nullptr) {
-    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, callback, state, nullptr);
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, callback, nullptr, nullptr);
     gst_object_unref(pad);
   }
   gst_object_unref(element);
@@ -316,8 +275,21 @@ std::string build_pipeline_string(const dvrk_data::AppConfig &cfg) {
                    ",height=" + std::to_string(cfg.original_height);
   }
 
+  const bool stereo_input = !cfg.stereo.gst_input.empty();
+  const std::string input_chain = stereo_input
+      ? cfg.stereo.gst_input +
+        " ! queue name=__raw_stereo_q__ max-size-buffers=3 leaky=downstream"
+        " ! tee name=__raw_stereo__ " : "";
+  const std::string left_input = stereo_input
+      ? "__raw_stereo__. ! queue max-size-buffers=2 leaky=downstream"
+        " ! videocrop left=0 right=" + std::to_string(cfg.original_width) +
+        " ! video/x-raw,width=" + std::to_string(cfg.original_width) : cfg.left.gst_input;
+  const std::string right_input = stereo_input
+      ? "__raw_stereo__. ! queue max-size-buffers=2 leaky=downstream"
+        " ! videocrop left=" + std::to_string(cfg.original_width) + " right=0"
+        " ! video/x-raw,width=" + std::to_string(cfg.original_width) : cfg.right.gst_input;
   const std::string left_chain =
-      cfg.left.gst_input +
+      left_input +
       " ! queue name=__left_src_q__ max-size-buffers=3 max-size-time=0 "
       "max-size-bytes=0 leaky=downstream"
       " ! videobalance name=left_balance brightness=" + std::to_string(cfg.left_color.brightness) +
@@ -333,7 +305,7 @@ std::string build_pipeline_string(const dvrk_data::AppConfig &cfg) {
       " ! __stereo_mix__.sink_0";
 
   const std::string right_chain =
-      cfg.right.gst_input +
+      right_input +
       " ! queue name=__right_src_q__ max-size-buffers=3 max-size-time=0 "
       "max-size-bytes=0 leaky=downstream"
       " ! videobalance name=right_balance brightness=" + std::to_string(cfg.right_color.brightness) +
@@ -371,7 +343,7 @@ std::string build_pipeline_string(const dvrk_data::AppConfig &cfg) {
         dvrk_gst::build_sink(abstract_name);
   }
 
-  return left_chain + " " + right_chain + " " + output_chain + " " + outputs;
+  return input_chain + left_chain + " " + right_chain + " " + output_chain + " " + outputs;
 }
 
 }  // namespace
@@ -418,14 +390,16 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (cfg.left.gst_input.empty() || cfg.right.gst_input.empty()) {
+  const bool has_left_input = !cfg.left.gst_input.empty();
+  const bool has_right_input = !cfg.right.gst_input.empty();
+  if (has_left_input != has_right_input ||
+      (!cfg.stereo.gst_input.empty() && has_left_input)) {
     RCLCPP_ERROR(node->get_logger(),
-                 "Config '%s' must define camera.left.gst_input and "
-                 "camera.right.gst_input",
-                 cfg.name.c_str());
-    rclcpp::shutdown();
-    return 1;
+                 "Specify either one stereo gst_input or both camera eye inputs");
+    rclcpp::shutdown(); return 1;
   }
+  if (!has_left_input && cfg.stereo.gst_input.empty())
+    cfg.stereo.gst_input = dvrk_gst::make(dvrk_gst::ROLE_STEREO_SOURCE, "stereo");
 
   if ((!cfg.auto_camera_size &&
        (cfg.original_width <= 0 || cfg.original_height <= 0)) ||
@@ -441,14 +415,23 @@ int main(int argc, char *argv[]) {
   if (!cfg.stereo.gst_output_specified)
     cfg.stereo.gst_output = dvrk_gst::make(
         dvrk_gst::ROLE_STEREO_ALIGNMENT, "stereo");
-  cfg.left.gst_input = dvrk_gst::build_input(
-      cfg.left.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
-  cfg.right.gst_input = dvrk_gst::build_input(
-      cfg.right.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
+  if (!cfg.stereo.gst_input.empty())
+    cfg.stereo.gst_input = dvrk_gst::build_input(
+        cfg.stereo.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
+  else {
+    cfg.left.gst_input = dvrk_gst::build_input(
+        cfg.left.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
+    cfg.right.gst_input = dvrk_gst::build_input(
+        cfg.right.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
+  }
 
   dvrk_video::Size calibrated_size{cfg.original_width, cfg.original_height};
-  for (const auto &input : {std::pair<const char *, std::string>{"left", cfg.left.gst_input},
-                            {"right", cfg.right.gst_input}}) {
+  const std::vector<std::pair<const char *, std::string>> inputs =
+      !cfg.stereo.gst_input.empty()
+          ? std::vector<std::pair<const char *, std::string>>{{"stereo", cfg.stereo.gst_input}}
+          : std::vector<std::pair<const char *, std::string>>{{"left", cfg.left.gst_input},
+                                                              {"right", cfg.right.gst_input}};
+  for (const auto &input : inputs) {
     RCLCPP_INFO(node->get_logger(), "Waiting for %s camera dimensions", input.first);
     const auto result = dvrk_video::probe_input_size(
         input.second, [] { return rclcpp::ok(); },
@@ -461,15 +444,23 @@ int main(int argc, char *argv[]) {
     }
     RCLCPP_INFO(node->get_logger(), "%s camera negotiated %s", input.first,
                 dvrk_video::describe(result.size).c_str());
-    if (cfg.auto_camera_size && calibrated_size.width == 0) {
-      calibrated_size = result.size;
-      cfg.original_width = result.size.width;
-      cfg.original_height = result.size.height;
+    dvrk_video::Size eye_size = result.size;
+    if (input.first == std::string("stereo")) {
+      if (eye_size.width < 2 || eye_size.width % 2) {
+        RCLCPP_ERROR(node->get_logger(), "Stereo input width must be even");
+        rclcpp::shutdown(); return 1;
+      }
+      eye_size.width /= 2;
     }
-    if (result.size != calibrated_size) {
+    if (cfg.auto_camera_size && calibrated_size.width == 0) {
+      calibrated_size = eye_size;
+      cfg.original_width = eye_size.width;
+      cfg.original_height = eye_size.height;
+    }
+    if (eye_size != calibrated_size) {
       RCLCPP_ERROR(node->get_logger(),
                    "%s camera is %s, calibration expects %s; update camera.size, crop, and shifts before restarting stereo_alignment",
-                   input.first, dvrk_video::describe(result.size).c_str(),
+                   input.first, dvrk_video::describe(eye_size).c_str(),
                    dvrk_video::describe(calibrated_size).c_str());
       rclcpp::shutdown();
       return 1;
@@ -515,13 +506,18 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  FrameTimestampState timestamp_state;
-  add_probe(pipeline, "__left_src_q__", input_timestamp_probe_cb,
-            &timestamp_state);
-  add_probe(pipeline, "__right_src_q__", input_timestamp_probe_cb,
-            &timestamp_state);
-  add_probe(pipeline, "__stereo_output_q__", output_timestamp_probe_cb,
-            &timestamp_state);
+  add_probe(pipeline, "__left_src_q__", input_timestamp_probe_cb);
+  add_probe(pipeline, "__right_src_q__", input_timestamp_probe_cb);
+  DcStereoTimestampState timestamp_state;
+  GstElement *compositor = gst_bin_get_by_name(GST_BIN(pipeline), "__stereo_mix__");
+  const bool timestamps_attached = dc_attach_stereo_timestamps(compositor, &timestamp_state);
+  if (compositor) gst_object_unref(compositor);
+  if (!timestamps_attached) {
+    RCLCPP_ERROR(node->get_logger(), "Cannot preserve stereo frame timestamps");
+    gst_object_unref(pipeline);
+    rclcpp::shutdown();
+    return 1;
+  }
 
   std::atomic_bool video_caps_failed{false};
   auto make_monitor = [&](const char *side) {

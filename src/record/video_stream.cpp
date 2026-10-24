@@ -380,6 +380,23 @@ void VideoStream::stop_and_save(const std::vector<std::string>& config_files) {
             set_gst_time("clock_time_ns", f.gst_clock_time_ns);
             fv["gst"] = gst;
 
+            auto reference_times = [](const std::vector<DcReferenceTimestamp>& timestamps) {
+                Json::Value list(Json::arrayValue);
+                for (const auto& timestamp : timestamps) {
+                    Json::Value entry;
+                    entry["reference"] = timestamp.reference;
+                    entry["timestamp_ns"] = GST_CLOCK_TIME_IS_VALID(timestamp.timestamp)
+                        ? Json::Value(Json::UInt64(timestamp.timestamp)) : Json::Value(Json::nullValue);
+                    entry["duration_ns"] = GST_CLOCK_TIME_IS_VALID(timestamp.duration)
+                        ? Json::Value(Json::UInt64(timestamp.duration)) : Json::Value(Json::nullValue);
+                    list.append(entry);
+                }
+                return list;
+            };
+            fv["reference_timestamps"]["mono"] = reference_times(f.mono_reference_timestamps);
+            fv["reference_timestamps"]["left"] = reference_times(f.left_reference_timestamps);
+            fv["reference_timestamps"]["right"] = reference_times(f.right_reference_timestamps);
+
             auto nullable_cpu_time = [](long long value) -> Json::Value {
                 return value == 0 ? Json::Value(Json::nullValue)
                                   : Json::Value((Json::Value::Int64)value);
@@ -388,6 +405,8 @@ void VideoStream::stop_and_save(const std::vector<std::string>& config_files) {
             realtime["mono_source_ns"] = nullable_cpu_time(f.cpu_realtime_mono_source_ns);
             realtime["left_source_ns"] = nullable_cpu_time(f.cpu_realtime_left_source_ns);
             realtime["right_source_ns"] = nullable_cpu_time(f.cpu_realtime_right_source_ns);
+            realtime["source_stereo_output_ns"] = nullable_cpu_time(f.cpu_realtime_source_stereo_output_ns);
+            realtime["alignment_output_ns"] = nullable_cpu_time(f.cpu_realtime_alignment_output_ns);
             realtime["stereo_output_ns"] = nullable_cpu_time(f.cpu_realtime_stereo_output_ns);
             realtime["overlay_output_ns"] = nullable_cpu_time(f.cpu_realtime_overlay_output_ns);
             realtime["recorder_reception_ns"] = (Json::Value::Int64)f.cpu_realtime_recorder_reception_ns;

@@ -243,11 +243,16 @@ GstPadProbeReturn timestamp_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointe
         }
 
         FrameData frame;
+        frame.mono_reference_timestamps = frame_timestamps.mono_reference_timestamps;
+        frame.left_reference_timestamps = frame_timestamps.left_reference_timestamps;
+        frame.right_reference_timestamps = frame_timestamps.right_reference_timestamps;
         frame.cpu_realtime_recorder_reception_ns = reception_realtime_ns;
         frame.cpu_monotonic_recorder_reception_ns = reception_monotonic_ns;
         frame.cpu_realtime_mono_source_ns = frame_timestamps.mono_source_ts;
         frame.cpu_realtime_left_source_ns = frame_timestamps.left_source_ts;
         frame.cpu_realtime_right_source_ns = frame_timestamps.right_source_ts;
+        frame.cpu_realtime_source_stereo_output_ns = frame_timestamps.source_stereo_output_ts;
+        frame.cpu_realtime_alignment_output_ns = frame_timestamps.alignment_output_ts;
         frame.cpu_realtime_stereo_output_ns = frame_timestamps.stereo_output_ts;
         frame.cpu_realtime_overlay_output_ns = frame_timestamps.overlay_output_ts;
         frame.gst_pts_ns = GST_BUFFER_PTS(buf);

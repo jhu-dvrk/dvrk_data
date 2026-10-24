@@ -211,6 +211,10 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
         cfg.ar.enabled = ar.get("enabled", true).asBool();
         if (ar.isMember("left")) cfg.ar.left = parse_endpoint(ar["left"]);
         if (ar.isMember("right")) cfg.ar.right = parse_endpoint(ar["right"]);
+        if (ar.isMember("stereo")) cfg.ar.stereo = parse_endpoint(ar["stereo"]);
+        if (cfg.ar.enabled && cfg.ar.stereo.gst_input.empty() &&
+            cfg.ar.left.gst_input.empty() && cfg.ar.right.gst_input.empty())
+            cfg.ar.stereo.gst_input = "@dvrk:control_panel:annotations";
         if (ar.isMember("color_key") && ar["color_key"].isArray() && ar["color_key"].size() == 3) {
             cfg.ar.use_color_key = true;
             cfg.ar.color_key_r = ar["color_key"][0].asInt();

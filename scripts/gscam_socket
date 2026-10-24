@@ -17,6 +17,7 @@ Optional arguments (passed through to gscam.launch.py)
   --namespace  <ns>     Override ROS namespace  (default: <role>/<name>)
   --frame-id   <fid>    Override TF frame_id    (default: <role>_<name>_frame)
   --camera-name <cn>    Override camera_name    (default: <role>_<name>)
+  --channel {left,right}  Select an eye from a stereo socket
 """
 
 import argparse
@@ -97,6 +98,13 @@ def main():
         help="Override the camera_name stored in CameraInfo.",
     )
 
+    parser.add_argument(
+        "--channel",
+        choices=("left", "right"),
+        default="",
+        help="Publish one eye from a stereo socket; reject mono sockets.",
+    )
+
     args = parser.parse_args()
 
     # ── No socket given: list and exit ──────────────────────────────────────
@@ -148,6 +156,8 @@ def main():
         cmd.append(f"frame_id:={args.frame_id}")
     if args.camera_name:
         cmd.append(f"camera_name:={args.camera_name}")
+    if args.channel:
+        cmd.append(f"channel:={args.channel}")
 
     # Print a summary so the user knows what is launching
     print(f"Launching gscam for socket: {fqn}")

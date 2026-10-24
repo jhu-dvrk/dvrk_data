@@ -48,7 +48,7 @@ struct PipelineReconnector {
     gst_element_set_state(pipeline, GST_STATE_NULL);
 
     if (timer_id == 0) {
-      RCLCPP_WARN(node->get_logger(), "[%s] Connection lost. Retrying to reconnect...", name.c_str());
+      RCLCPP_WARN(node->get_logger(), "[%s] Connection lost. Retry connect...", name.c_str());
       timer_id = g_timeout_add(1000, [](gpointer data) -> gboolean {
         auto *self = static_cast<PipelineReconnector *>(data);
         if (!self->is_active || !self->pipeline) {

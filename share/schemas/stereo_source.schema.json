@@ -20,7 +20,8 @@
         "left": { "$ref": "#/$defs/sourceEndpoint" },
         "right": { "$ref": "#/$defs/sourceEndpoint" }
       }
-    }
+    },
+    "gst_output": { "type": "string", "pattern": "^@dvrk:[^:]+:[^:]+$", "default": "@dvrk:stereo_source:stereo", "description": "Combined side-by-side LR output socket." }
   },
   "$defs": {
     "size": {
@@ -38,7 +39,7 @@
       "required": ["gst_input"],
       "properties": {
         "gst_input": { "$ref": "#/$defs/gstInput" },
-        "gst_output": { "$ref": "#/$defs/gstOutput" }
+        "gst_output": { "$ref": "#/$defs/gstOutput", "description": "Optional separate eye output socket; omitted or empty disables it." }
       }
     },
     "gstInput": {

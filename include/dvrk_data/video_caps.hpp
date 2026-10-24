@@ -93,6 +93,8 @@ inline ProbeResult probe_input_size(
     gst_object_unref(bus);
     gst_object_unref(sink);
     gst_object_unref(pipeline);
+    if (!keep_waiting() && !result.size.valid())
+      return {{}, "stopped while waiting for video dimensions"};
     if (!reconnect) return result;
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
   }

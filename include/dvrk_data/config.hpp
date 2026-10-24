@@ -37,6 +37,7 @@ struct ARConfig {
     bool enabled = false;
     SourceConfig left;
     SourceConfig right;
+    SourceConfig stereo;
     bool use_color_key = false;
     int color_key_r = 0;
     int color_key_g = 0;
