@@ -26,8 +26,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "horizontal_shift_px": { "type": "integer", "default": 0 },
-            "vertical_shift_px": { "type": "integer", "default": 0 }
+            "horizontal_shift_px": { "type": "integer", "default": 0, "description": "Per-camera horizontal crop alignment in input pixels; positive increases crossed disparity. This does not change physical camera baseline." },
+            "vertical_shift_px": { "type": "integer", "default": 0, "description": "Per-camera vertical crop alignment in input pixels." }
           }
         }
       }

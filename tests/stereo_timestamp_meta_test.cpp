@@ -5,6 +5,7 @@
 #include <gst/video/video.h>
 #include <unistd.h>
 #include <iostream>
+#include <cstdlib>
 #include <stdexcept>
 
 void check(bool value, const char *message) {
@@ -46,7 +47,8 @@ void roundtrip(GstBuffer *buffer) {
 
 int main(int argc, char **argv) {
     const bool camera_only = argc > 1 && std::string(argv[1]) == "--camera";
-    const bool gl = camera_only || (argc > 1 && std::string(argv[1]) == "--gl");
+    const bool shifted_gl = argc > 1 && std::string(argv[1]) == "--gl-shift";
+    const bool gl = camera_only || shifted_gl || (argc > 1 && std::string(argv[1]) == "--gl");
     const bool source_stage = argc > 1 && std::string(argv[1]) == "--source";
     gst_init(&argc, &argv);
     dc_frame_timestamps_meta_register();
@@ -61,9 +63,11 @@ int main(int argc, char **argv) {
     const std::string output = gl
         ? " ! video/x-raw(memory:GLMemory),width=16,height=8,framerate=10/1 ! gldownload ! video/x-raw,format=RGBA"
         : " ! video/x-raw,format=RGBA,width=16,height=8,framerate=10/1";
+    const std::string left_shift = shifted_gl ? " ! videobox left=-1 right=1" : "";
+    const std::string right_shift = shifted_gl ? " ! videobox left=1 right=-1" : "";
     auto *pipeline = parse(
-        "appsrc name=left format=time ! video/x-raw,format=RGBA,width=8,height=8,framerate=10/1 ! queue" + upload + " ! mix.sink_0 "
-        "appsrc name=right format=time ! video/x-raw,format=RGBA,width=8,height=8,framerate=5/1 ! queue" + upload + " ! mix.sink_1 " +
+        "appsrc name=left format=time ! video/x-raw,format=RGBA,width=8,height=8,framerate=10/1 ! queue" + left_shift + upload + " ! mix.sink_0 "
+        "appsrc name=right format=time ! video/x-raw,format=RGBA,width=8,height=8,framerate=5/1 ! queue" + right_shift + upload + " ! mix.sink_1 " +
         compositor + " name=mix sink_1::xpos=8" + output + " ! appsink name=result sync=false");
     auto *mix = gst_bin_get_by_name(GST_BIN(pipeline), "mix");
     auto *sink = gst_bin_get_by_name(GST_BIN(pipeline), "result");
@@ -118,13 +122,29 @@ int main(int argc, char **argv) {
         auto *buffer = gst_sample_get_buffer(sample);
         GstMapInfo map;
         check(gst_buffer_map(buffer, &map, GST_MAP_READ), "Cannot map stereo frame");
-        const unsigned left = map.data[0], right = camera_only ? left : map.data[8 * 4];
+        const unsigned left = map.data[shifted_gl ? 4 : 0];
+        const unsigned right = camera_only ? left : map.data[8 * 4];
+        if (shifted_gl)
+            check(map.data[0] == 0 && map.data[15 * 4] == 0,
+                  "Shifted eyes must have black borders without cross-eye spill");
         gst_buffer_unmap(buffer, &map);
         last = dc_buffer_get_frame_timestamps(buffer);
         check(last.left_reference_timestamps.size() == 2 && last.right_reference_timestamps.size() == 2, "Composition lost reference metadata");
-        check(last.left_reference_timestamps[0].timestamp == left * 1000 &&
-              last.right_reference_timestamps[0].timestamp == right * 1000 + 100, "Hardware timestamps do not match composed pixels");
-        check(last.left_source_ts == 1000 + left && last.right_source_ts == 2000 + right, "CPU timestamps do not match composed pixels");
+        if (shifted_gl) {
+            // videobox/GL conversion can round a color channel by one level.
+            const auto left_index = last.left_reference_timestamps[0].timestamp / 1000;
+            const auto right_index = (last.right_reference_timestamps[0].timestamp - 100) / 1000;
+            check(std::abs(static_cast<int>(left) - static_cast<int>(left_index)) <= 1 &&
+                  std::abs(static_cast<int>(right) - static_cast<int>(right_index)) <= 1,
+                  "Shifted pixels do not match selected hardware frames");
+            check(last.left_source_ts == 1000 + left_index &&
+                  last.right_source_ts == 2000 + right_index,
+                  "Shifted CPU and hardware timestamps disagree");
+        } else {
+            check(last.left_reference_timestamps[0].timestamp == left * 1000 &&
+                  last.right_reference_timestamps[0].timestamp == right * 1000 + 100, "Hardware timestamps do not match composed pixels");
+            check(last.left_source_ts == 1000 + left && last.right_source_ts == 2000 + right, "CPU timestamps do not match composed pixels");
+        }
         if (!gl) check(last.channel == "stereo-LR", "Stereo channel metadata was lost");
         check((source_stage ? last.source_stereo_output_ts > 777 : last.source_stereo_output_ts == 777) &&
               ((gl || source_stage) ? last.alignment_output_ts == 888 : last.alignment_output_ts > 888) &&

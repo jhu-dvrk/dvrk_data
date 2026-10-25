@@ -1,79 +1,19 @@
 #!/usr/bin/env python3
 
 import argparse
+import copy
 import json
-import os
-import select
+import threading
+import time
 from pathlib import Path
-import sys
-import termios
-import tty
 
 import cv2
 import numpy as np
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf, GLib, Gtk
 from dvrk_data import dvrk_gst_socket as dvrk_gst
-
-KEY_UP = "UP"
-KEY_DOWN = "DOWN"
-KEY_LEFT = "LEFT"
-KEY_RIGHT = "RIGHT"
-KEY_PLUS = "+"
-KEY_MINUS = "-"
-KEY_QUIT = "q"
-KEY_FULLSCREEN = "f"
-KEY_RESET_SHIFT = "r"
-KEY_COLOR_CALIBRATE = "c"
-KEY_STRETCH_OUT = "o"
-KEY_STRETCH_IN = "p"
-
-
-class TerminalInput:
-    def __init__(self):
-        self.old_settings = termios.tcgetattr(sys.stdin)
-
-    def __enter__(self):
-        tty.setcbreak(sys.stdin.fileno())
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
-
-    def get_key(self):
-        # Read the most recent key only to prevent buffering lag
-        key = None
-        while select.select([sys.stdin], [], [], 0)[0]:
-            ch = sys.stdin.read(1)
-            if ch == "\x1b":
-                ch2 = sys.stdin.read(1)
-                if ch2 == "[":
-                    ch3 = sys.stdin.read(1)
-                    if ch3 == "A":
-                        key = KEY_UP
-                    elif ch3 == "B":
-                        key = KEY_DOWN
-                    elif ch3 == "C":
-                        key = KEY_RIGHT
-                    elif ch3 == "D":
-                        key = KEY_LEFT
-                continue
-            if ch in ("q", "Q"):
-                key = KEY_QUIT
-            elif ch in ("f", "F"):
-                key = KEY_FULLSCREEN
-            elif ch in ("+", "="):
-                key = KEY_PLUS
-            elif ch in ("-", "_"):
-                key = KEY_MINUS
-            elif ch in ("r", "R"):
-                key = KEY_RESET_SHIFT
-            elif ch in ("c", "C"):
-                key = KEY_COLOR_CALIBRATE
-            elif ch in ("o", "O"):
-                key = KEY_STRETCH_OUT
-            elif ch in ("p", "P"):
-                key = KEY_STRETCH_IN
-        return key
-
 
 def clip_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
@@ -81,133 +21,56 @@ def clip_int(value: int, min_value: int, max_value: int) -> int:
 def clip_float(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))
 
-def compute_stats(bgr):
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-    mean_v, std_v = cv2.meanStdDev(hsv[:, :, 2])
-    mean_s, std_s = cv2.meanStdDev(hsv[:, :, 1])
+def compute_stats(yuv, mask):
+    pixels = yuv[mask].astype(np.float32)
+    luma = pixels[:, 0]
+    chroma = pixels[:, 1:] - 128.0
     return {
-        "mean_v": float(mean_v[0][0]),
-        "std_v": float(std_v[0][0]),
-        "mean_s": float(mean_s[0][0]),
-        "std_s": float(std_s[0][0])
+        "mean_y": float(np.mean(luma)),
+        "std_y": float(np.std(luma)),
+        "chroma_rms": float(np.sqrt(np.mean(np.sum(chroma * chroma, axis=1)))),
     }
 
-def calculate_match_from_stats(source_stats, target_stats):
-    std_v_s = max(1.0, float(source_stats["std_v"]))
-    contrast = float(target_stats["std_v"]) / std_v_s
-    contrast = clip_float(float(contrast), 0.1, 2.0)
-    
-    brightness = (float(target_stats["mean_v"]) - float(source_stats["mean_v"]) * contrast) / 255.0
-    brightness = clip_float(float(brightness), -1.0, 1.0)
-    
-    mean_s_s = max(1.0, float(source_stats["mean_s"]))
-    saturation = float(target_stats["mean_s"]) / mean_s_s
-    saturation = clip_float(float(saturation), 0.0, 2.0)
-    
-    return {"brightness": brightness, "contrast": contrast, "saturation": saturation, "hue": 0.0}
 
-def compute_robust_stats(bgr, margin=0.15):
-    # Mask/Crop central ROI to ignore black corners
-    h, w = bgr.shape[:2]
-    crop_y = int(h * margin)
-    crop_x = int(w * margin)
-    roi = bgr[crop_y:h-crop_y, crop_x:w-crop_x]
+def calculate_match_from_stats(source, target, luma_only=False):
+    # A nearly flat image does not contain enough information to fit contrast.
+    contrast = (clip_float(target["std_y"] / source["std_y"], 0.7, 1.3)
+                if source["std_y"] >= 8.0 and target["std_y"] >= 8.0 else 1.0)
+    # GStreamer videobalance applies contrast around video black (Y=16).
+    brightness = (target["mean_y"] - 16.0
+                  - (source["mean_y"] - 16.0) * contrast) / 255.0
+    brightness = clip_float(brightness, -0.25, 0.25)
+    saturation = 1.0
+    if not luma_only and min(source["chroma_rms"], target["chroma_rms"]) >= 8.0:
+        saturation = clip_float(target["chroma_rms"] / source["chroma_rms"], 0.7, 1.3)
+    return {"brightness": brightness, "contrast": contrast,
+            "saturation": saturation, "hue": 0.0}
 
-    # Convert to YCrCb for perceptual luma and chroma
-    ycrcb = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb).astype(np.float32)
-    y_channel = ycrcb[:, :, 0]
-    cr = ycrcb[:, :, 1] - 128.0
-    cb = ycrcb[:, :, 2] - 128.0
-    chroma_radius = np.sqrt(cr**2 + cb**2)
-
-    # Use percentiles for robust luma statistics
-    p10 = np.percentile(y_channel, 10)
-    p90 = np.percentile(y_channel, 90)
-    
-    # Use median for saturation
-    median_chroma = np.median(chroma_radius)
-
-    # Compute circular mean of Hue for tint correction
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV).astype(np.float32)
-    hue_rad = np.deg2rad(hsv[:, :, 0] * 2.0)  # OpenCV hue is 0-180
-    mean_hue_sin = np.mean(np.sin(hue_rad))
-    mean_hue_cos = np.mean(np.cos(hue_rad))
-    avg_hue_rad = np.arctan2(mean_hue_sin, mean_hue_cos)
-
-    return {
-        "p10": p10,
-        "p90": p90,
-        "median_chroma": median_chroma,
-        "avg_hue_rad": avg_hue_rad
-    }
-
-def calculate_match_robust(source_stats, target_stats):
-    src_range = max(1.0, source_stats["p90"] - source_stats["p10"])
-    contrast = (target_stats["p90"] - target_stats["p10"]) / src_range
-    contrast = clip_float(contrast, 0.1, 2.0)
-    
-    # videobalance: Y_out = Y_in * contrast + brightness * 255
-    brightness = (target_stats["p10"] - source_stats["p10"] * contrast) / 255.0
-    brightness = clip_float(brightness, -1.0, 1.0)
-    
-    src_chroma = max(1.0, source_stats["median_chroma"])
-    saturation = target_stats["median_chroma"] / src_chroma
-    saturation = clip_float(saturation, 0.0, 2.0)
-    
-    hue_diff_rad = target_stats["avg_hue_rad"] - source_stats["avg_hue_rad"]
-    hue_diff_rad = (hue_diff_rad + np.pi) % (2.0 * np.pi) - np.pi  # wrap to [-pi, pi]
-    hue = hue_diff_rad / np.pi
-    hue = clip_float(hue, -1.0, 1.0)
-    
-    return {
-        "brightness": float(brightness),
-        "contrast": float(contrast),
-        "saturation": float(saturation),
-        "hue": float(hue)
-    }
 
 def calculate_calibration(mode, left_bgr, right_bgr):
-    neutral = {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}
+    neutral = dict(NEUTRAL_COLOR)
     if mode == "none":
         return neutral, neutral
-        
-    if mode.endswith("_robust"):
-        left_stats = compute_robust_stats(left_bgr)
-        right_stats = compute_robust_stats(right_bgr)
-        
-        if mode == "left_ref_robust":
-            return neutral, calculate_match_robust(right_stats, left_stats)
-        elif mode == "right_ref_robust":
-            return calculate_match_robust(left_stats, right_stats), neutral
-        elif mode == "average_robust":
-            avg_stats = {
-                "p10": (left_stats["p10"] + right_stats["p10"]) / 2.0,
-                "p90": (left_stats["p90"] + right_stats["p90"]) / 2.0,
-                "median_chroma": (left_stats["median_chroma"] + right_stats["median_chroma"]) / 2.0,
-                "avg_hue_rad": np.arctan2(
-                    (np.sin(left_stats["avg_hue_rad"]) + np.sin(right_stats["avg_hue_rad"])) / 2.0,
-                    (np.cos(left_stats["avg_hue_rad"]) + np.cos(right_stats["avg_hue_rad"])) / 2.0
-                )
-            }
-            return calculate_match_robust(left_stats, avg_stats), calculate_match_robust(right_stats, avg_stats)
-    else:
-        left_stats = compute_stats(left_bgr)
-        right_stats = compute_stats(right_bgr)
-        
-        if mode == "left_ref":
-            return neutral, calculate_match_from_stats(right_stats, left_stats)
-        elif mode == "right_ref":
-            return calculate_match_from_stats(left_stats, right_stats), neutral
-        elif mode == "average":
-            avg_stats = {
-                "mean_v": (left_stats["mean_v"] + right_stats["mean_v"]) / 2.0,
-                "std_v": (left_stats["std_v"] + right_stats["std_v"]) / 2.0,
-                "mean_s": (left_stats["mean_s"] + right_stats["mean_s"]) / 2.0,
-                "std_s": (left_stats["std_s"] + right_stats["std_s"]) / 2.0
-            }
-            return calculate_match_from_stats(left_stats, avg_stats), calculate_match_from_stats(right_stats, avg_stats)
-            
-    return neutral, neutral
+    left_yuv = cv2.cvtColor(left_bgr, cv2.COLOR_BGR2YUV)
+    right_yuv = cv2.cvtColor(right_bgr, cv2.COLOR_BGR2YUV)
+    # Compare corresponding visible pixels, excluding black borders and clipped highlights.
+    mask = ((left_yuv[:, :, 0] >= 24) & (left_yuv[:, :, 0] <= 235)
+            & (right_yuv[:, :, 0] >= 24) & (right_yuv[:, :, 0] <= 235))
+    if np.count_nonzero(mask) < max(100, mask.size // 100):
+        return None
+    left_stats = compute_stats(left_yuv, mask)
+    right_stats = compute_stats(right_yuv, mask)
+    if mode == "left_ref":
+        return neutral, calculate_match_from_stats(right_stats, left_stats)
+    if mode == "right_ref":
+        return calculate_match_from_stats(left_stats, right_stats), neutral
+    if mode in ("average", "average_luma"):
+        average = {key: (left_stats[key] + right_stats[key]) / 2.0 for key in left_stats}
+        luma_only = mode == "average_luma"
+        return (calculate_match_from_stats(left_stats, average, luma_only),
+                calculate_match_from_stats(right_stats, average, luma_only))
+    raise ValueError(f"Unknown color matching mode: {mode}")
+
 
 def apply_color_calibration_preview(bgr, color_params):
     brightness = color_params.get("brightness", 0.0)
@@ -216,29 +79,17 @@ def apply_color_calibration_preview(bgr, color_params):
     hue = color_params.get("hue", 0.0)
     if brightness == 0.0 and contrast == 1.0 and saturation == 1.0 and hue == 0.0:
         return bgr
-        
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-    
-    if hue != 0.0:
-        # GStreamer hue shifts from -1.0 to 1.0 (representing -180 to 180 deg).
-        # OpenCV hue is 0 to 180 (representing 0 to 360 deg). So we shift by hue * 90.
-        hsv[:, :, 0] = (hsv[:, :, 0] + hue * 90.0) % 180.0
-        
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation, 0, 255)
-    hsv[:, :, 2] = np.clip((hsv[:, :, 2] - 16) * contrast + 16 + brightness * 255.0, 0, 255)
-    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-
-def compute_crop_size_from_percent(working_w: int, working_h: int, resize_percent: int):
-    crop_w = max(1, int(round(working_w * 100.0 / resize_percent)))
-    crop_h = max(1, int(round(working_h * 100.0 / resize_percent)))
-    return crop_w, crop_h
-
-
-def compute_resize_percent_from_crop(working_w: int, crop_w: int):
-    if crop_w <= 0:
-        return 100
-    return clip_int(int(round(working_w * 100.0 / crop_w)), 100, 200)
+    # Approximate GStreamer videobalance in YUV rather than HSV.
+    yuv = cv2.cvtColor(bgr, cv2.COLOR_BGR2YUV).astype(np.float32)
+    yuv[:, :, 0] = np.clip(16 + (yuv[:, :, 0] - 16) * contrast
+                           + brightness * 255.0, 0, 255)
+    u = yuv[:, :, 1] - 128.0
+    v = yuv[:, :, 2] - 128.0
+    angle = np.pi * hue
+    yuv[:, :, 1] = np.clip(128 + saturation * (u * np.cos(angle) + v * np.sin(angle)), 0, 255)
+    yuv[:, :, 2] = np.clip(128 + saturation * (-u * np.sin(angle) + v * np.cos(angle)), 0, 255)
+    return cv2.cvtColor(yuv.astype(np.uint8), cv2.COLOR_YUV2BGR)
 
 
 def offset_valid_range(working_size: int, crop_size: int):
@@ -259,6 +110,17 @@ def offset_valid_range(working_size: int, crop_size: int):
 def clamp_offset_to_valid(working_size: int, crop_size: int, offset_px: int) -> int:
     minimum, maximum = offset_valid_range(working_size, crop_size)
     return clip_int(offset_px, minimum, maximum)
+
+
+def maximal_crop_for_shift(working_size: int, offset_px: int) -> int:
+    """Largest crop for which both eye crops support the requested shift."""
+    if offset_px == 0:
+        return working_size
+    for crop_size in range(working_size - 1, 0, -1):
+        minimum, maximum = offset_valid_range(working_size, crop_size)
+        if minimum <= offset_px <= maximum:
+            return crop_size
+    return 1
 
 
 def compute_axis_starts(crop_total: int, offset_px: int):
@@ -288,18 +150,6 @@ def crop_frame(frame, crop):
     return frame[top_crop:height - bottom_crop, left_crop:width - right_crop]
 
 
-def make_room_for_offset(original_w: int, original_h: int, resize_percent: int, width_offset: int, target_h_shift: int, target_v_shift: int) -> int:
-    while resize_percent < 200:
-        crop_w, crop_h = compute_crop_size_from_percent(original_w, original_h, resize_percent)
-        crop_w = clip_int(crop_w + width_offset, 1, original_w)
-        h_min, h_max = offset_valid_range(original_w, crop_w)
-        v_min, v_max = offset_valid_range(original_h, crop_h)
-        if h_min <= target_h_shift <= h_max and v_min <= target_v_shift <= v_max:
-            break
-        resize_percent += 1
-    return resize_percent
-
-
 def as_preview_pipeline(source_snippet: str) -> str:
     snippet = source_snippet.strip()
     if "appsink" in snippet:
@@ -307,27 +157,31 @@ def as_preview_pipeline(source_snippet: str) -> str:
     return f"{snippet} ! videoconvert ! appsink drop=true sync=false"
 
 
-def open_capture(source_label: str, source_snippet: str):
+def open_capture(source_label: str, source_snippet: str, timeout=10.0):
     pipeline = as_preview_pipeline(source_snippet)
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        msg = (
-            f"Unable to open {source_label} source with GStreamer backend.\n"
-            f"Pipeline: {pipeline}\n"
+    deadline = time.monotonic() + timeout
+    while True:
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            return cap
+        cap.release()
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+    msg = (f"Unable to open {source_label} source with GStreamer backend.\n"
+           f"Pipeline: {pipeline}\n")
+    if "unixfdsrc" in pipeline:
+        import re
+        match = re.search(r"socket-path=(\S+)", pipeline)
+        socket_path = ("@" + match.group(1)) if match else "<socket>"
+        msg += (
+            f"\nThe abstract socket {socket_path} could not be opened.\n"
+            "Start source and calibration together from the configuration directory:\n"
+            "  ros2 launch dvrk_data stereo_alignment_calibration.launch.py\n"
+            "\nTo list currently active @dvrk sockets:\n"
+            "  ros2 run dvrk_data gscam_socket"
         )
-        if "unixfdsrc" in pipeline:
-            import re
-            m = re.search(r"socket-path=(\S+)", pipeline)
-            socket_path = ("@" + m.group(1)) if m else "<socket>"
-            msg += (
-                f"\nThe abstract socket {socket_path} could not be opened.\n"
-                "Make sure stereo_source is running with the matching configuration:\n"
-                "  ros2 run dvrk_data stereo_source -c <stereo_source.json>\n"
-                "\nTo list currently active @dvrk sockets:\n"
-                "  ros2 run dvrk_data gscam_socket"
-            )
-        raise RuntimeError(msg)
-    return cap
+    raise RuntimeError(msg)
 
 
 def ensure_config_fields(config):
@@ -336,14 +190,10 @@ def ensure_config_fields(config):
     config.setdefault("name", "stereo_alignment")
     config.setdefault("preserve_size", True)
     cam = config.setdefault("camera", {})
-    sz = cam.setdefault("size", {})
-    sz.setdefault("width", 0)
-    sz.setdefault("height", 0)
+    cam.setdefault("size", "auto")
     lft = cam.setdefault("left", {})
-    lft.setdefault("gst_input", "")
     lft.setdefault("color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
     rgt = cam.setdefault("right", {})
-    rgt.setdefault("gst_input", "")
     rgt.setdefault("color", {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0})
     return config
 
@@ -358,9 +208,9 @@ def load_or_create(path: Path):
         "name": "stereo_alignment",
         "preserve_size": True,
         "camera": {
-            "size": {"width": 0, "height": 0},
-            "left": {"gst_input": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
-            "right": {"gst_input": "", "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
+            "size": "auto",
+            "left": {"color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
+            "right": {"color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}},
         },
     }
 
@@ -368,379 +218,549 @@ def load_or_create(path: Path):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Interactive dvrk_console stereo calibration tool. "
+            "Interactive dvrk_data stereo alignment calibration tool. "
             "Loads or creates a JSON file, previews stereo composition, and saves crop/shift values in pixels."
         )
     )
-    parser.add_argument("-c", "--config", required=True, help="Path to dvrk_console JSON config")
-    parser.add_argument("-l", "--left", help="Left source GStreamer snippet")
-    parser.add_argument("-r", "--right", help="Right source GStreamer snippet")
-    parser.add_argument("-s", "--split", action="store_true", help="Split stereo view in two windows")
+    parser.add_argument("-c", "--config", required=True, help="Path to dvrk_data stereo_alignment JSON config")
     return parser.parse_args()
 
 
-def apply_stream_overrides(config, args):
-    if args.left is not None:
-        config.setdefault("camera", {}).setdefault("left", {})["gst_input"] = args.left
-    if args.right is not None:
-        config.setdefault("camera", {}).setdefault("right", {})["gst_input"] = args.right
-
-
-def update_config_from_runtime(config, left, right, original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, left_color, right_color):
+def update_config_from_runtime(config, stereo_input, original_w, original_h,
+                               crop_w, crop_h, horizontal_shift, vertical_shift,
+                               left_color, right_color):
     config.setdefault("type", "dvrk_data:stereo_alignment@1.0.0")
     config.setdefault("name", "stereo_alignment")
     config.setdefault("preserve_size", True)
+    if stereo_input != "@dvrk:stereo_source:stereo":
+        config["gst_input"] = stereo_input
+    else:
+        config.pop("gst_input", None)
 
     cam = config.setdefault("camera", {})
     cam["size"] = (
-        "auto" if any("@dvrk:" in stream or "unixfdsrc" in stream for stream in (left, right))
+        "auto" if "@dvrk:" in stereo_input or "unixfdsrc" in stereo_input
         else {"width": int(original_w), "height": int(original_h)}
     )
-    
-    # Store source streams if they were override args, or if they were already there
-    if "left" not in cam:
-        cam["left"] = {}
-    if "right" not in cam:
-        cam["right"] = {}
-    
-    cam["left"]["gst_input"] = left
+    cam.setdefault("left", {}).pop("gst_input", None)
+    cam.setdefault("right", {}).pop("gst_input", None)
     cam["left"]["color"] = left_color
-    cam["right"]["gst_input"] = right
     cam["right"]["color"] = right_color
-
-    if int(crop_w) != int(original_w) or int(crop_h) != int(original_h):
-        cam["crop"] = {"width": int(crop_w), "height": int(crop_h)}
-    else:
-        cam.pop("crop", None)
-    if int(horizontal_shift) != 0 or int(vertical_shift) != 0:
-        cam["alignment"] = {"horizontal_shift_px": int(horizontal_shift), "vertical_shift_px": int(vertical_shift)}
-    else:
-        cam.pop("alignment", None)
-
-
-def interactive_tune(config, split_mode=False):
-    app_name = config.get("name", "dvrk_display")
-    cam_cfg = config.get("camera", {})
-    left = cam_cfg.get("left", {}).get("gst_input", "").strip()
-    right = cam_cfg.get("right", {}).get("gst_input", "").strip()
-
-    # Get camera dimensions from config
-    cam_size = cam_cfg.get("size", {})
-    if cam_size == "auto":
-        cam_size = {}
-    original_w = int(cam_size.get("width", 0))
-    original_h = int(cam_size.get("height", 0))
-
-    left = dvrk_gst.build_input(
-        left, dvrk_gst.ROLE_STEREO_SOURCE, original_w, original_h)
-    right = dvrk_gst.build_input(
-        right, dvrk_gst.ROLE_STEREO_SOURCE, original_w, original_h)
-
-    if not left or not right:
-        raise RuntimeError("Both camera.left.gst_input and camera.right.gst_input are required")
-
-    left_cap = open_capture("left", left)
-    right_cap = open_capture("right", right)
-
-    ok_left, left_frame = left_cap.read()
-    ok_right, right_frame = right_cap.read()
-    if not ok_left or left_frame is None or not ok_right or right_frame is None:
-        raise RuntimeError("Unable to read first frame from one or both GStreamer sources")
-
-    left_h, left_w = left_frame.shape[:2]
-    right_h, right_w = right_frame.shape[:2]
-
-    detected_w = min(left_w, right_w)
-    detected_h = min(left_h, right_h)
-    
-    if original_w <= 0:
-        original_w = detected_w
-    if original_h <= 0:
-        original_h = detected_h
-
-    original_w = min(original_w, detected_w)
-    original_h = min(original_h, detected_h)
-
-    cam_crop = cam_cfg.get("crop", {})
-    configured_crop_w = int(cam_crop.get("width", 0))
-    configured_crop_h = int(cam_crop.get("height", 0))
-    if configured_crop_w > 0:
-        resize_percent = compute_resize_percent_from_crop(original_w, configured_crop_w)
-    elif configured_crop_h > 0:
-        resize_percent = compute_resize_percent_from_crop(original_h, configured_crop_h)
-    else:
-        resize_percent = 100
-    crop_w, crop_h = compute_crop_size_from_percent(original_w, original_h, resize_percent)
-    width_offset = 0
-    if configured_crop_w > 0:
-        width_offset = configured_crop_w - crop_w
-
-    cam_align = cam_cfg.get("alignment", {})
-    horizontal_shift = int(cam_align.get("horizontal_shift_px", 0))
-    vertical_shift = int(cam_align.get("vertical_shift_px", 0))
-    horizontal_shift = clamp_offset_to_valid(original_w, crop_w, horizontal_shift)
-    vertical_shift = clamp_offset_to_valid(original_h, crop_h, vertical_shift)
-    
-    color_calibration_modes = ["none", "left_ref", "right_ref", "average", "left_ref_robust", "right_ref_robust", "average_robust"]
-    current_color_mode_idx = 0
-    _neutral_color = {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}
-    left_color_calibration = cam_cfg.get("left", {}).get("color", dict(_neutral_color))
-    right_color_calibration = cam_cfg.get("right", {}).get("color", dict(_neutral_color))
-    
-    right_active = (
-        right_color_calibration.get("brightness", 0.0) != 0.0 or
-        right_color_calibration.get("contrast", 1.0) != 1.0 or
-        right_color_calibration.get("saturation", 1.0) != 1.0 or
-        right_color_calibration.get("hue", 0.0) != 0.0
-    )
-    left_active = (
-        left_color_calibration.get("brightness", 0.0) != 0.0 or
-        left_color_calibration.get("contrast", 1.0) != 1.0 or
-        left_color_calibration.get("saturation", 1.0) != 1.0 or
-        left_color_calibration.get("hue", 0.0) != 0.0
-    )
-    
-    if right_active and left_active:
-        # Check if the active values have non-zero hue (usually indicating robust calibration was used)
-        if right_color_calibration.get("hue", 0.0) != 0.0 or left_color_calibration.get("hue", 0.0) != 0.0:
-            current_color_mode_idx = 6 # average_robust
-        else:
-            current_color_mode_idx = 3 # average
-    elif right_active:
-        if right_color_calibration.get("hue", 0.0) != 0.0:
-            current_color_mode_idx = 4 # left_ref_robust
-        else:
-            current_color_mode_idx = 1 # left_ref
-    elif left_active:
-        if left_color_calibration.get("hue", 0.0) != 0.0:
-            current_color_mode_idx = 5 # right_ref_robust
-        else:
-            current_color_mode_idx = 2 # right_ref
-
-    window_name = "stereo_preview"
-    left_window_name = "left_preview"
-    right_window_name = "right_preview"
-    overlay_name = "stereo_overlay"
-    preview_fullscreen = False
-
-    if split_mode:
-        cv2.namedWindow(left_window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
-        cv2.resizeWindow(left_window_name, max(640, crop_w), max(360, crop_h))
-        cv2.namedWindow(right_window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
-        cv2.resizeWindow(right_window_name, max(640, crop_w), max(360, crop_h))
-    else:
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
-        cv2.resizeWindow(window_name, max(960, 2 * crop_w), max(360, crop_h))
-
-    cv2.namedWindow(overlay_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
-    cv2.resizeWindow(overlay_name, max(640, crop_w), max(360, crop_h))
-
-    print(
-        "Detected sizes: "
-        f"left={left_w}x{left_h}, right={right_w}x{right_h}, "
-        f"original={original_w}x{original_h}"
-    )
-    print("Controls: +/- resize (1%), o/p stretch, arrows=shift, r=reset shift, c=color calib, f=fullscreen, q=quit")
-
-
-    with TerminalInput() as term:
-        while True:
-            # OpenCV Loop (Display and Key Handling)
-            ok_left, left_frame = left_cap.read()
-            ok_right, right_frame = right_cap.read()
-            if not ok_left or left_frame is None:
-                left_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ok_left, left_frame = left_cap.read()
-            if not ok_right or right_frame is None:
-                right_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ok_right, right_frame = right_cap.read()
-            if not ok_left or not ok_right or left_frame is None or right_frame is None:
-                continue
-
-            left_base = left_frame[:original_h, :original_w]
-            right_base = right_frame[:original_h, :original_w]
-
-            crop_w, crop_h = compute_crop_size_from_percent(original_w, original_h, resize_percent)
-            crop_w = clip_int(crop_w + width_offset, 1, original_w)
-
-            horizontal_shift = clamp_offset_to_valid(original_w, crop_w, horizontal_shift)
-            vertical_shift = clamp_offset_to_valid(original_h, crop_h, vertical_shift)
-
-            left_crop = compute_eye_crop(original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, sign=-1)
-            right_crop = compute_eye_crop(original_w, original_h, crop_w, crop_h, horizontal_shift, vertical_shift, sign=1)
-
-            left_out = crop_frame(left_base, left_crop)
-            right_out = crop_frame(right_base, right_crop)
-
-            if left_out.size == 0 or right_out.size == 0:
-                continue
-
-            left_preview = apply_color_calibration_preview(left_out, left_color_calibration)
-            right_preview = apply_color_calibration_preview(right_out, right_color_calibration)
-
-            preview = np.hstack([left_preview, right_preview])
-
-            h_min, h_max = offset_valid_range(original_w, crop_w)
-            v_min, v_max = offset_valid_range(original_h, crop_h)
-            mode_name = color_calibration_modes[current_color_mode_idx]
-            info = (
-                f"original:{original_w}x{original_h} crop:{crop_w}x{crop_h} "
-                f"resize:{resize_percent}% "
-                f"shift(h,v):({horizontal_shift},{vertical_shift}) "
-                f"color mode:{mode_name}"
-            )
-            controls = "+/-:size o/p:stretch arrows:cam_shift r:reset c:color f:fs q:quit"
-            
-            if split_mode:
-                cv2.putText(left_preview, info, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.putText(left_preview, controls, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.imshow(left_window_name, left_preview)
-                cv2.imshow(right_window_name, right_preview)
-            else:
-                cv2.putText(preview, info, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.putText(preview, controls, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-                display = preview
-                if preview_fullscreen:
-                    try:
-                        _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
-                        if win_w > 0 and win_h > 0:
-                            display = cv2.resize(preview, (win_w, win_h), interpolation=cv2.INTER_LINEAR)
-                    except cv2.error:
-                        pass
-                cv2.imshow(window_name, display)
-
-            gray_left = cv2.cvtColor(left_out, cv2.COLOR_BGR2GRAY)
-            gray_right = cv2.cvtColor(right_out, cv2.COLOR_BGR2GRAY)
-            bgr_left = cv2.cvtColor(gray_left, cv2.COLOR_GRAY2BGR).astype(np.int16)
-            bgr_right = cv2.cvtColor(gray_right, cv2.COLOR_GRAY2BGR).astype(np.int16)
-            bgr_left[:, :, 1] = np.clip(bgr_left[:, :, 1] + 40, 0, 255)
-            bgr_right[:, :, 1] = np.clip(bgr_right[:, :, 1] - 40, 0, 255)
-            overlay = ((bgr_left + bgr_right) / 2).astype(np.uint8)
-            cv2.putText(overlay, "OVERLAY", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-            cv2.imshow(overlay_name, overlay)
-
-            cv2.waitKey(1)
-            key = term.get_key()
-
-            if key == KEY_QUIT:
-                break
-            if key == KEY_FULLSCREEN:
-                preview_fullscreen = not preview_fullscreen
-                mode = cv2.WINDOW_FULLSCREEN if preview_fullscreen else cv2.WINDOW_NORMAL
-                aspect = cv2.WINDOW_FREERATIO if preview_fullscreen else cv2.WINDOW_KEEPRATIO
-                if split_mode:
-                    cv2.setWindowProperty(left_window_name, cv2.WND_PROP_FULLSCREEN, mode)
-                    cv2.setWindowProperty(left_window_name, cv2.WND_PROP_ASPECT_RATIO, aspect)
-                    cv2.setWindowProperty(right_window_name, cv2.WND_PROP_FULLSCREEN, mode)
-                    cv2.setWindowProperty(right_window_name, cv2.WND_PROP_ASPECT_RATIO, aspect)
-                else:
-                    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, mode)
-                    cv2.setWindowProperty(window_name, cv2.WND_PROP_ASPECT_RATIO, aspect)
-            elif key == KEY_LEFT:
-                horizontal_shift -= 2
-                resize_percent = make_room_for_offset(original_w, original_h, resize_percent, width_offset, horizontal_shift, vertical_shift)
-            elif key == KEY_RIGHT:
-                horizontal_shift += 2
-                resize_percent = make_room_for_offset(original_w, original_h, resize_percent, width_offset, horizontal_shift, vertical_shift)
-            elif key == KEY_UP:
-                vertical_shift -= 2
-                resize_percent = make_room_for_offset(original_w, original_h, resize_percent, width_offset, horizontal_shift, vertical_shift)
-            elif key == KEY_DOWN:
-                vertical_shift += 2
-                resize_percent = make_room_for_offset(original_w, original_h, resize_percent, width_offset, horizontal_shift, vertical_shift)
-            elif key == KEY_PLUS:
-                resize_percent = clip_int(resize_percent + 1, 100, 200)
-            elif key == KEY_MINUS:
-                resize_percent = clip_int(resize_percent - 1, 100, 200)
-            elif key == KEY_STRETCH_OUT:
-                width_offset += 2
-            elif key == KEY_STRETCH_IN:
-                width_offset -= 2
-            elif key == KEY_RESET_SHIFT:
-                horizontal_shift = 0
-                vertical_shift = 0
-            elif key == KEY_COLOR_CALIBRATE:
-                current_color_mode_idx = (current_color_mode_idx + 1) % len(color_calibration_modes)
-                mode_name = color_calibration_modes[current_color_mode_idx]
-                left_color_calibration, right_color_calibration = calculate_calibration(mode_name, left_out, right_out)
-
-    left_cap.release()
-    right_cap.release()
-    cv2.destroyAllWindows()
-
-    return {
-        "left": left,
-        "right": right,
-        "original_width": int(original_w),
-        "original_height": int(original_h),
-        "crop_width": int(crop_w),
-        "crop_height": int(crop_h),
-        "resize_percent": int(resize_percent),
+    cam["crop"] = {"width": int(crop_w), "height": int(crop_h)}
+    cam["alignment"] = {
         "horizontal_shift_px": int(horizontal_shift),
         "vertical_shift_px": int(vertical_shift),
-        "left_color": left_color_calibration,
-        "right_color": right_color_calibration,
     }
+
+
+NEUTRAL_COLOR = {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0}
+COLOR_MODES = {
+    "Left reference": "left_ref",
+    "Right reference": "right_ref",
+    "Average": "average",
+    "Average (luminance only)": "average_luma",
+}
+
+
+class FrameReader:
+    """Keep socket reads off the UI thread and retain only the newest frame."""
+
+    def __init__(self, capture, first_frame):
+        self.capture = capture
+        self.frame = first_frame
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        while not self.stop_event.is_set():
+            ok, frame = self.capture.read()
+            if ok and frame is not None:
+                with self.lock:
+                    self.frame = frame
+            else:
+                self.stop_event.wait(0.05)
+
+    def latest(self):
+        with self.lock:
+            return self.frame
+
+    def stop(self):
+        self.stop_event.set()
+        self.thread.join(timeout=0.5)
+        if not self.thread.is_alive():
+            self.capture.release()
+
+
+class VideoWindow(Gtk.Window):
+    """A movable preview window that can be hidden and restored."""
+
+    def __init__(self, title, width=720, height=550):
+        super().__init__(title=title)
+        self.set_default_size(width, height)
+        self.image = Gtk.Image()
+        self.add(self.image)
+        self.connect("delete-event", self._hide_on_close)
+
+    def _hide_on_close(self, _window, _event):
+        self.hide()
+        return True
+
+    def set_frame(self, bgr):
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        height, width = rgb.shape[:2]
+        data = GLib.Bytes.new(rgb.tobytes())
+        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
+            data, GdkPixbuf.Colorspace.RGB, False, 8, width, height, width * 3)
+        allocated = self.image.get_allocation()
+        default_width, default_height = self.get_default_size()
+        available_width = allocated.width if allocated.width > 1 else default_width - 16
+        available_height = allocated.height if allocated.height > 1 else default_height - 70
+        scale = min(available_width / width, available_height / height)
+        pixbuf = pixbuf.scale_simple(max(1, round(width * scale)),
+                                     max(1, round(height * scale)),
+                                     GdkPixbuf.InterpType.BILINEAR)
+        self.image.set_from_pixbuf(pixbuf)
+
+
+def compose_difference_overlay(left, right, difference_gain, brightness):
+    """Show shared detail in gray and unmatched eyes in complementary colors."""
+    left_gray = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    right_gray = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    shared = np.minimum(left_gray, right_gray) * 0.5
+    left_only = np.maximum(left_gray - right_gray, 0) * difference_gain
+    right_only = np.maximum(right_gray - left_gray, 0) * difference_gain
+    green = np.clip((shared + left_only) * brightness, 0, 255).astype(np.uint8)
+    magenta = np.clip((shared + right_only) * brightness, 0, 255).astype(np.uint8)
+    return cv2.merge((magenta, green, magenta))
+
+
+class OverlayWindow(VideoWindow):
+    def __init__(self):
+        Gtk.Window.__init__(self, title="Stereo alignment overlay")
+        self.set_default_size(720, 550)
+        self.connect("delete-event", self._hide_on_close)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.add(content)
+        self.image = Gtk.Image()
+        content.pack_start(self.image, True, True, 0)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.set_border_width(8)
+        row.pack_start(Gtk.Label(label="Brightness"), False, False, 0)
+        self.brightness = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 200, 5)
+        self.brightness.set_value(100)
+        self.brightness.set_digits(0)
+        self.brightness.set_hexpand(True)
+        row.pack_start(self.brightness, True, True, 0)
+        content.pack_start(row, False, False, 0)
+        difference_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        difference_row.set_border_width(8)
+        difference_row.pack_start(Gtk.Label(label="Difference gain"), False, False, 0)
+        self.difference_gain = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 1, 12, 0.5)
+        self.difference_gain.set_value(5)
+        self.difference_gain.set_digits(1)
+        self.difference_gain.set_hexpand(True)
+        difference_row.pack_start(self.difference_gain, True, True, 0)
+        content.pack_start(difference_row, False, False, 0)
+
+
+class CalibrationWindow(Gtk.Window):
+    def __init__(self, config, path, stereo_input, capture, first_frame):
+        super().__init__(title="dVRK stereo alignment calibration")
+        self.set_default_size(840, 850)
+        self.connect("delete-event", self._on_close)
+        self.config = config
+        self.path = path
+        self.stereo_input = stereo_input
+        self.reader = FrameReader(capture, first_frame)
+        self.eye_width = first_frame.shape[1] // 2
+        self.eye_height = first_frame.shape[0]
+        cam = config["camera"]
+        size = cam.get("size", "auto")
+        if size == "auto":
+            size = {}
+        self.original_width = min(int(size.get("width", self.eye_width)), self.eye_width)
+        self.original_height = min(int(size.get("height", self.eye_height)), self.eye_height)
+        crop = cam.get("crop", {})
+        crop_width = clip_int(int(crop.get("width", self.original_width)), 1, self.original_width)
+        crop_height = clip_int(int(crop.get("height", self.original_height)), 1, self.original_height)
+        alignment = cam.get("alignment", {})
+        self.last_frame = first_frame
+        self.stereo_window = VideoWindow("Stereo preview (left | right)", 1100, 620)
+        self.left_window = VideoWindow("Left preview")
+        self.right_window = VideoWindow("Right preview")
+        self.overlay_window = OverlayWindow()
+        self._setup_ui(crop_width, crop_height, alignment, cam)
+        self.saved_config = copy.deepcopy(config)
+        self._closing = False
+        self.timer_id = GLib.timeout_add(100, self.refresh_preview)
+        self.refresh_preview()
+
+    @staticmethod
+    def _section(title):
+        frame = Gtk.Frame(label=title)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+        frame.add(box)
+        return frame, box
+
+    @staticmethod
+    def _spin(minimum, maximum, value, digits=0):
+        spin = Gtk.SpinButton.new_with_range(minimum, maximum, 0.01 if digits else 1)
+        spin.set_digits(digits)
+        spin.set_value(value)
+        spin.set_width_chars(12 if digits else 7)
+        return spin
+
+    @staticmethod
+    def _row(box, label, widget):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        caption = Gtk.Label(label=label, xalign=0)
+        caption.set_hexpand(True)
+        row.pack_start(caption, True, True, 0)
+        row.pack_end(widget, False, False, 0)
+        box.pack_start(row, False, False, 0)
+
+    def _setup_ui(self, crop_width, crop_height, alignment, cam):
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        root.set_border_width(10)
+        self.add(root)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        root.pack_start(scroll, True, True, 0)
+        settings = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        settings.set_border_width(4)
+        scroll.add(settings)
+        geometry_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        color_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        settings.pack_start(geometry_column, True, True, 0)
+        settings.pack_start(color_column, True, True, 0)
+
+        frame, box = self._section("Video windows")
+        self.side_by_side = Gtk.CheckButton(label="Side-by-side stereo preview")
+        self.side_by_side.set_active(True)
+        self.side_by_side.connect("toggled", self._show_video_windows)
+        box.pack_start(self.side_by_side, False, False, 0)
+        show = Gtk.Button(label="Show video windows")
+        show.connect("clicked", self._show_video_windows)
+        box.pack_start(show, False, False, 0)
+        geometry_column.pack_start(frame, False, False, 0)
+
+        frame, box = self._section("Source")
+        for text in (f"Stereo input: {self.stereo_input}",
+                     f"Detected per eye: {self.eye_width} × {self.eye_height}",
+                     f"Working size: {self.original_width} × {self.original_height}",
+                     f"Configuration: {self.path}"):
+            label = Gtk.Label(label=text, xalign=0)
+            label.set_line_wrap(True)
+            label.set_max_width_chars(45)
+            box.pack_start(label, False, False, 0)
+        geometry_column.pack_start(frame, False, False, 0)
+
+        frame, box = self._section("Crop")
+        self.crop_check = Gtk.CheckButton(label="Apply crop")
+        self.crop_check.set_active(True)
+        self.crop_check.connect("toggled", self._crop_changed)
+        box.pack_start(self.crop_check, False, False, 0)
+        self.auto_crop = Gtk.CheckButton(label="Auto-crop for current alignment")
+        self.auto_crop.set_active(True)
+        self.auto_crop.connect("toggled", self._crop_changed)
+        box.pack_start(self.auto_crop, False, False, 0)
+        self.crop_width = self._spin(1, self.original_width, crop_width)
+        self.crop_height = self._spin(1, self.original_height, crop_height)
+        self._row(box, "Width (px)", self.crop_width)
+        self._row(box, "Height (px)", self.crop_height)
+        geometry_column.pack_start(frame, False, False, 0)
+
+        frame, box = self._section("Alignment")
+        self.alignment_check = Gtk.CheckButton(label="Apply alignment")
+        horizontal = int(alignment.get("horizontal_shift_px", 0))
+        vertical = int(alignment.get("vertical_shift_px", 0))
+        self.alignment_check.set_active(horizontal != 0 or vertical != 0)
+        self.alignment_check.connect("toggled", self._alignment_changed)
+        box.pack_start(self.alignment_check, False, False, 0)
+        hmin, hmax = offset_valid_range(self.original_width, 1)
+        vmin, vmax = offset_valid_range(self.original_height, 1)
+        self.horizontal = self._spin(hmin, hmax, clip_int(horizontal, hmin, hmax))
+        self.vertical = self._spin(vmin, vmax, clip_int(vertical, vmin, vmax))
+        self._row(box, "Horizontal shift (px)", self.horizontal)
+        self._row(box, "Vertical shift (px)", self.vertical)
+        reset = Gtk.Button(label="Reset alignment")
+        reset.connect("clicked", self.reset_alignment)
+        box.pack_start(reset, False, False, 0)
+        geometry_column.pack_start(frame, False, False, 0)
+
+        frame, box = self._section("Automatic color match")
+        self.color_mode = Gtk.ComboBoxText()
+        for name in COLOR_MODES:
+            self.color_mode.append_text(name)
+        self.color_mode.set_active(3)
+        self._row(box, "Method", self.color_mode)
+        match = Gtk.Button(label="Calculate from current frame")
+        match.connect("clicked", self.calculate_color_match)
+        box.pack_start(match, False, False, 0)
+        reset_color = Gtk.Button(label="Reset color adjustments")
+        reset_color.connect("clicked", self.reset_color)
+        box.pack_start(reset_color, False, False, 0)
+        color_column.pack_start(frame, False, False, 0)
+
+        self.color_checks = {}
+        self.color_controls = {}
+        for eye in ("left", "right"):
+            frame, box = self._section(f"{eye.capitalize()} color")
+            check = Gtk.CheckButton(label="Apply color correction")
+            values = cam.get(eye, {}).get("color", {})
+            check.set_active(any(float(values.get(key, neutral)) != neutral
+                                 for key, neutral in NEUTRAL_COLOR.items()))
+            box.pack_start(check, False, False, 0)
+            controls = {}
+            for key, neutral in NEUTRAL_COLOR.items():
+                minimum = 0 if key in ("contrast", "saturation") else -1
+                maximum = 2 if key in ("contrast", "saturation") else 1
+                spin = self._spin(minimum, maximum, float(values.get(key, neutral)), 9)
+                self._row(box, key.capitalize(), spin)
+                controls[key] = spin
+            check.connect("toggled", self._color_changed, eye)
+            self.color_checks[eye] = check
+            self.color_controls[eye] = controls
+            color_column.pack_start(frame, False, False, 0)
+        self._crop_changed()
+        self._alignment_changed()
+        for eye in ("left", "right"):
+            self._color_changed(None, eye)
+
+        self.status = Gtk.Label(xalign=0)
+        self.status.set_line_wrap(True)
+        root.pack_start(self.status, False, False, 0)
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, callback in (("Save", self.save),
+                                ("Save & quit", self.save_and_quit),
+                                ("Quit", self._quit_clicked)):
+            button = Gtk.Button(label=label)
+            button.set_size_request(-1, 42)
+            button.connect("clicked", callback)
+            actions.pack_start(button, True, True, 0)
+        root.pack_start(actions, False, False, 0)
+
+    def _crop_changed(self, _button=None):
+        enabled = self.crop_check.get_active()
+        self.auto_crop.set_sensitive(enabled)
+        manual = enabled and not self.auto_crop.get_active()
+        self.crop_width.set_sensitive(manual)
+        self.crop_height.set_sensitive(manual)
+
+    def _alignment_changed(self, _button=None):
+        enabled = self.alignment_check.get_active()
+        self.horizontal.set_sensitive(enabled)
+        self.vertical.set_sensitive(enabled)
+        if enabled and not self.crop_check.get_active():
+            self.crop_check.set_active(True)
+            self.auto_crop.set_active(True)
+
+    def _color_changed(self, _button, eye):
+        enabled = self.color_checks[eye].get_active()
+        for control in self.color_controls[eye].values():
+            control.set_sensitive(enabled)
+
+    def _show_video_windows(self, _button=None):
+        if self.side_by_side.get_active():
+            self.left_window.hide()
+            self.right_window.hide()
+            self.stereo_window.show_all()
+        else:
+            self.stereo_window.hide()
+            self.left_window.show_all()
+            self.right_window.show_all()
+        self.overlay_window.show_all()
+
+    def show_previews(self):
+        self.stereo_window.move(500, 40)
+        self.left_window.move(500, 40)
+        self.right_window.move(540, 80)
+        self.overlay_window.move(580, 120)
+        self._show_video_windows()
+
+    def reset_alignment(self, _button=None):
+        self.horizontal.set_value(0)
+        self.vertical.set_value(0)
+        self.alignment_check.set_active(False)
+
+    def effective_settings(self):
+        horizontal = self.horizontal.get_value_as_int() if self.alignment_check.get_active() else 0
+        vertical = self.vertical.get_value_as_int() if self.alignment_check.get_active() else 0
+        if self.crop_check.get_active():
+            if self.auto_crop.get_active():
+                width = maximal_crop_for_shift(self.original_width, horizontal)
+                height = maximal_crop_for_shift(self.original_height, vertical)
+                if self.crop_width.get_value_as_int() != width:
+                    self.crop_width.set_value(width)
+                if self.crop_height.get_value_as_int() != height:
+                    self.crop_height.set_value(height)
+            else:
+                width = self.crop_width.get_value_as_int()
+                height = self.crop_height.get_value_as_int()
+        else:
+            width, height = self.original_width, self.original_height
+        horizontal = clamp_offset_to_valid(self.original_width, width, horizontal)
+        vertical = clamp_offset_to_valid(self.original_height, height, vertical)
+        colors = {}
+        for eye in ("left", "right"):
+            colors[eye] = ({key: spin.get_value() for key, spin in self.color_controls[eye].items()}
+                           if self.color_checks[eye].get_active() else dict(NEUTRAL_COLOR))
+        return width, height, horizontal, vertical, colors
+
+    def _cropped_eyes(self, frame, width, height, horizontal, vertical):
+        left = frame[:self.original_height, :self.original_width]
+        right = frame[:self.original_height, self.eye_width:self.eye_width + self.original_width]
+        left = crop_frame(left, compute_eye_crop(self.original_width, self.original_height,
+                                                width, height, horizontal, vertical, -1))
+        right = crop_frame(right, compute_eye_crop(self.original_width, self.original_height,
+                                                  width, height, horizontal, vertical, 1))
+        return left, right
+
+    def refresh_preview(self):
+        frame = self.reader.latest()
+        if frame is None or frame.shape[1] != 2 * self.eye_width or frame.shape[0] < self.original_height:
+            return True
+        self.last_frame = frame
+        width, height, horizontal, vertical, colors = self.effective_settings()
+        left, right = self._cropped_eyes(frame, width, height, horizontal, vertical)
+        if left.size == 0 or right.size == 0:
+            return True
+        preview_width = min(width, 800)
+        target = (preview_width, max(1, round(height * preview_width / width)))
+        left = cv2.resize(left, target, interpolation=cv2.INTER_AREA)
+        right = cv2.resize(right, target, interpolation=cv2.INTER_AREA)
+        left = apply_color_calibration_preview(left, colors["left"])
+        right = apply_color_calibration_preview(right, colors["right"])
+        if self.side_by_side.get_active():
+            self.stereo_window.set_frame(np.hstack((left, right)))
+        else:
+            self.left_window.set_frame(left)
+            self.right_window.set_frame(right)
+        overlay = compose_difference_overlay(
+            left, right,
+            self.overlay_window.difference_gain.get_value(),
+            self.overlay_window.brightness.get_value() / 100.0)
+        self.overlay_window.set_frame(overlay)
+        self.status.set_text(f"Output per eye: {width} × {height} px. "
+                             f"Shift: horizontal {horizontal:+d}, vertical {vertical:+d} px.")
+        return True
+
+    def reset_color(self, _button=None):
+        for eye in ("left", "right"):
+            for key, spin in self.color_controls[eye].items():
+                spin.set_value(NEUTRAL_COLOR[key])
+            self.color_checks[eye].set_active(False)
+        self.refresh_preview()
+
+    def calculate_color_match(self, _button=None):
+        width, height, horizontal, vertical, _ = self.effective_settings()
+        left, right = self._cropped_eyes(self.last_frame, width, height, horizontal, vertical)
+        if left.size == 0 or right.size == 0:
+            return
+        mode = COLOR_MODES[self.color_mode.get_active_text()]
+        values = calculate_calibration(mode, left, right)
+        if values is None:
+            self.status.set_text("Not enough visible, unclipped pixels to calculate a color match.")
+            return
+        for eye, color in zip(("left", "right"), values):
+            for key, spin in self.color_controls[eye].items():
+                spin.set_value(color[key])
+            self.color_checks[eye].set_active(any(abs(color[key] - neutral) > 0.0005
+                                                  for key, neutral in NEUTRAL_COLOR.items()))
+        self.refresh_preview()
+
+    def configured_values(self):
+        width, height, horizontal, vertical, colors = self.effective_settings()
+        config = copy.deepcopy(self.config)
+        update_config_from_runtime(config, self.stereo_input,
+                                   self.original_width, self.original_height,
+                                   width, height, horizontal, vertical,
+                                   colors["left"], colors["right"])
+        return config
+
+    def save(self, _button=None):
+        config = self.configured_values()
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            dialog = Gtk.MessageDialog(
+                transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.CLOSE, text=f"Could not save calibration: {exc}")
+            dialog.run()
+            dialog.destroy()
+            return False
+        self.config = config
+        self.saved_config = copy.deepcopy(config)
+        self.status.set_text(f"Saved {self.path}")
+        return True
+
+    def save_and_quit(self, _button=None):
+        if self.save():
+            self._closing = True
+            self.close()
+
+    def _quit_clicked(self, _button):
+        self.close()
+
+    def _on_close(self, _window, _event):
+        if not self._closing and self.configured_values() != self.saved_config:
+            dialog = Gtk.MessageDialog(
+                transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE, text="Save changes before quitting?")
+            dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                               "Discard", Gtk.ResponseType.NO,
+                               "Save", Gtk.ResponseType.YES)
+            answer = dialog.run()
+            dialog.destroy()
+            if answer == Gtk.ResponseType.CANCEL or answer == Gtk.ResponseType.DELETE_EVENT:
+                return True
+            if answer == Gtk.ResponseType.YES and not self.save():
+                return True
+        GLib.source_remove(self.timer_id)
+        self.reader.stop()
+        for window in (self.stereo_window, self.left_window,
+                       self.right_window, self.overlay_window):
+            window.destroy()
+        Gtk.main_quit()
+        return False
+
 
 def main():
     args = parse_args()
     path = Path(args.config)
-    file_exists = path.exists()
-
-    if not file_exists and (not args.left or not args.right):
-        print("Error: config file does not exist. Please provide both -l/--left and -r/--right to create it.")
-        return 1
-
     config = load_or_create(path)
-
     ensure_config_fields(config)
-    apply_stream_overrides(config, args)
-
+    cam_size = config["camera"].get("size", "auto")
+    if cam_size == "auto":
+        cam_size = {}
+    stereo_input = config.get("gst_input", "@dvrk:stereo_source:stereo").strip()
+    if not stereo_input:
+        print("Error: gst_input must be a nonempty stereo socket or GStreamer source")
+        return 1
+    pipeline = dvrk_gst.build_input(stereo_input, dvrk_gst.ROLE_STEREO_SOURCE,
+                                    2 * int(cam_size.get("width", 0)),
+                                    int(cam_size.get("height", 0)))
     try:
-        split_mode = args.split or any(
-            s in config.get("sinks", []) for s in ("separate", "glimages")
-        )
-        runtime_values = interactive_tune(config, split_mode=split_mode)
+        capture = open_capture("stereo", pipeline)
+        ok, first_frame = capture.read()
+        if not ok or first_frame is None:
+            raise RuntimeError("Unable to read the first frame from the stereo source")
+        if first_frame.shape[1] < 2 or first_frame.shape[1] % 2:
+            raise RuntimeError("Stereo source width must be positive and even")
     except RuntimeError as exc:
+        if "capture" in locals():
+            capture.release()
         print(f"Error: {exc}")
         return 1
-
-    update_config_from_runtime(
-        config,
-        runtime_values["left"],
-        runtime_values["right"],
-        runtime_values["original_width"],
-        runtime_values["original_height"],
-        runtime_values["crop_width"],
-        runtime_values["crop_height"],
-        runtime_values["horizontal_shift_px"],
-        runtime_values["vertical_shift_px"],
-        runtime_values["left_color"],
-        runtime_values["right_color"]
-    )
-
-    while True:
-        decision = input(f"Save updated configuration to {path}? [y/N]: ").strip().lower()
-        if decision in ("y", "yes"):
-            save_requested = True
-            break
-        if decision in ("", "n", "no"):
-            save_requested = False
-            break
-        print("Please answer with y/yes or n/no.")
-
-    if not save_requested:
-        print("Changes discarded.")
-        return 0
-
-    rendered = json.dumps(config, indent=2)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as stream:
-        stream.write(rendered + "\n")
-
-    print(f"Wrote {path}")
-    print("Saved fields: left, right, original_*, crop_*, *_shift_px")
+    window = CalibrationWindow(config, path, stereo_input, capture, first_frame)
+    window.show_all()
+    window.show_previews()
+    Gtk.main()
     return 0
 
 

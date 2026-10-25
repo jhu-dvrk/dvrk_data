@@ -64,6 +64,9 @@ struct AppConfig {
     int horizontal_shift_px = 0;
     int vertical_shift_px = 0;
     int display_horizontal_offset_px = 0;
+    int display_horizontal_shift_px = 0;
+    int widget_horizontal_disparity_px = 0;
+    bool legacy_display_horizontal_offset = false;
     bool preserve_size = true;
     std::vector<std::string> sinks;
     std::vector<std::string> sink_streams;

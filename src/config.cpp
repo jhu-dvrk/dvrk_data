@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace dvrk_data {
@@ -74,8 +75,19 @@ AppConfig Config::parse_app_config(const Json::Value& root) {
     cfg.overlay_alpha = root.get("overlay_alpha", 0.7).asDouble();
     cfg.preserve_size = root.get("preserve_size", true).asBool();
 
-    if (root.isMember("display_horizontal_offset_px"))
+    if (root.isMember("display_horizontal_offset_px")) {
+        if (root.isMember("widget_horizontal_disparity_px"))
+            throw std::runtime_error("Specify either display_horizontal_offset_px or widget_horizontal_disparity_px, not both.");
         cfg.display_horizontal_offset_px = root["display_horizontal_offset_px"].asInt();
+        if (cfg.display_horizontal_offset_px == std::numeric_limits<int>::min())
+            throw std::runtime_error("display_horizontal_offset_px is outside the supported range.");
+        cfg.widget_horizontal_disparity_px = -cfg.display_horizontal_offset_px;
+        cfg.legacy_display_horizontal_offset = true;
+    }
+    if (root.isMember("display_horizontal_shift_px"))
+        cfg.display_horizontal_shift_px = root["display_horizontal_shift_px"].asInt();
+    if (root.isMember("widget_horizontal_disparity_px"))
+        cfg.widget_horizontal_disparity_px = root["widget_horizontal_disparity_px"].asInt();
 
     if (root.isMember("sinks") && root["sinks"].isArray()) {
         for (const auto& item : root["sinks"]) {
