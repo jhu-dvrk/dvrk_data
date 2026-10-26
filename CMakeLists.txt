@@ -18,11 +18,12 @@ find_package(rosbag2_cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(JSONCPP REQUIRED jsoncpp)
-pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0)
+pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0 gstreamer-allocators-1.0)
 pkg_check_modules(GTK REQUIRED gtk+-3.0)
 pkg_check_modules(GTKMM REQUIRED gtkmm-3.0)
 
 add_library(dvrk_data
+  src/latest_video.cpp
   src/config.cpp
   src/collection_config.cpp
   src/tags.cpp
@@ -213,6 +214,11 @@ ament_export_dependencies(ament_index_cpp)
 
 if(BUILD_TESTING)
   enable_testing()
+  add_executable(latest_video_test tests/latest_video_test.cpp)
+  target_link_libraries(latest_video_test dvrk_data)
+  add_test(NAME latest_video COMMAND latest_video_test)
+  add_test(NAME latest_video_i420 COMMAND latest_video_test --i420)
+  set_tests_properties(latest_video latest_video_i420 PROPERTIES TIMEOUT 15)
   add_executable(stereo_timestamp_meta_test tests/stereo_timestamp_meta_test.cpp)
   target_include_directories(stereo_timestamp_meta_test PRIVATE include ${GST_INCLUDE_DIRS})
   target_link_libraries(stereo_timestamp_meta_test ${GST_LIBRARIES})
