@@ -21,6 +21,14 @@ public:
     static bool save_stereo_calibration_file(const std::string &filepath,
                                             const StereoCalibrationResult &result);
 
+    /// Archive raw calibration pairs, board settings, and copies of exported YAML.
+    /// Creates a unique stereo_calibration_<local date/time> directory in output_dir.
+    static bool save_calibration_archive(const std::string &output_dir,
+                                         const std::vector<CalibrationFrame> &frames,
+                                         const CharucoConfig &board,
+                                         std::string &archive_dir,
+                                         std::string &error_msg);
+
     /// Load full stereo calibration from file (YAML or JSON)
     static bool load_stereo_calibration_file(const std::string &filepath,
                                             StereoCalibrationResult &result);

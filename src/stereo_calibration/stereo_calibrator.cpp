@@ -11,6 +11,127 @@
 
 namespace dvrk_data::calibration {
 
+bool StereoCalibrator::reproject_grid(const CalibrationFrame &frame,
+                                      const CharucoConfig &board,
+                                      const StereoCalibrationResult &calib,
+                                      GridReprojection &output,
+                                      std::string &error_msg) {
+    output = GridReprojection();
+    error_msg.clear();
+    if (!calib.success || calib.K1.empty() || calib.K2.empty() ||
+        calib.R.empty() || calib.T.empty()) {
+        error_msg = "Run stereo calibration before validating samples.";
+        return false;
+    }
+    if (frame.left_image.empty() || frame.right_image.empty() ||
+        frame.left_image.size() != calib.image_size ||
+        frame.right_image.size() != calib.image_size) {
+        error_msg = "Sample resolution does not match the calibration.";
+        return false;
+    }
+    const auto count = frame.object_points.size();
+    if (count < 6 || frame.left_corners.size() != count ||
+        frame.right_corners.size() != count || board.squares_x < 2 ||
+        board.squares_y < 2 || board.square_length_mm <= 0) {
+        error_msg = "Sample needs at least six matching board corners.";
+        return false;
+    }
+    // A line of corners cannot constrain a planar board pose.
+    bool spans_plane = false;
+    const auto origin = frame.object_points.front();
+    for (size_t i = 1; i + 1 < count; ++i) {
+        const auto a = frame.object_points[i] - origin;
+        const auto b = frame.object_points[i + 1] - origin;
+        if (cv::norm(a.cross(b)) > 1e-6) { spans_plane = true; break; }
+    }
+    if (!spans_plane) {
+        error_msg = "Detected board corners do not span a plane.";
+        return false;
+    }
+    try {
+        cv::Mat rvec_l, tvec_l, rotation_l;
+        if (!cv::solvePnP(frame.object_points, frame.left_corners,
+                          calib.K1, calib.D1, rvec_l, tvec_l)) {
+            error_msg = "Could not estimate the board pose.";
+            return false;
+        }
+        cv::Rodrigues(rvec_l, rotation_l);
+        cv::Mat rotation_r = calib.R * rotation_l;
+        cv::Mat tvec_r = calib.R * tvec_l + calib.T;
+        cv::Mat rvec_r;
+        cv::Rodrigues(rotation_r, rvec_r);
+
+        // Sample each grid line so lens distortion also curves the overlay.
+        std::vector<std::vector<cv::Point3f>> lines;
+        constexpr int steps = 64;
+        const float width = board.squares_x * board.square_length_mm;
+        const float height = board.squares_y * board.square_length_mm;
+        for (int x = 0; x <= board.squares_x; ++x) {
+            std::vector<cv::Point3f> line;
+            for (int j = 0; j <= steps; ++j)
+                line.emplace_back(x * board.square_length_mm, height * j / steps, 0);
+            lines.push_back(std::move(line));
+        }
+        for (int y = 0; y <= board.squares_y; ++y) {
+            std::vector<cv::Point3f> line;
+            for (int j = 0; j <= steps; ++j)
+                line.emplace_back(width * j / steps, y * board.square_length_mm, 0);
+            lines.push_back(std::move(line));
+        }
+        auto render = [&](const cv::Mat &image, const cv::Mat &K, const cv::Mat &D,
+                          const cv::Mat &rotation, const cv::Mat &rvec, const cv::Mat &tvec,
+                          const std::vector<cv::Point2f> &detected,
+                          cv::Mat &overlay, double &rms) {
+            if (image.channels() == 1) cv::cvtColor(image, overlay, cv::COLOR_GRAY2BGR);
+            else overlay = image.clone();
+            auto in_front = [&](const cv::Point3f &point) {
+                return rotation.at<double>(2, 0) * point.x +
+                       rotation.at<double>(2, 1) * point.y +
+                       rotation.at<double>(2, 2) * point.z + tvec.at<double>(2) > 1e-6;
+            };
+            auto drawable = [](const cv::Point2f &point) {
+                return std::isfinite(point.x) && std::isfinite(point.y) &&
+                       std::abs(point.x) < 1e7 && std::abs(point.y) < 1e7;
+            };
+            for (const auto &line : lines) {
+                std::vector<cv::Point2f> projected;
+                cv::projectPoints(line, rvec, tvec, K, D, projected);
+                for (size_t i = 1; i < projected.size(); ++i) {
+                    if (!in_front(line[i - 1]) || !in_front(line[i]) ||
+                        !drawable(projected[i - 1]) || !drawable(projected[i])) continue;
+                    cv::Point a = projected[i - 1], b = projected[i];
+                    if (cv::clipLine(overlay.size(), a, b))
+                        cv::line(overlay, a, b, cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
+                }
+            }
+            std::vector<cv::Point2f> projected;
+            cv::projectPoints(frame.object_points, rvec, tvec, K, D, projected);
+            double sum = 0;
+            for (size_t i = 0; i < count; ++i) {
+                if (!in_front(frame.object_points[i]) || !drawable(projected[i]))
+                    CV_Error(cv::Error::StsBadArg, "Board pose projects corners behind the camera or outside numeric range");
+                const auto residual = projected[i] - detected[i];
+                sum += residual.dot(residual);
+                cv::Point a = detected[i], b = projected[i];
+                if (cv::clipLine(overlay.size(), a, b))
+                    cv::line(overlay, a, b, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
+                if (cv::Rect(0, 0, overlay.cols, overlay.rows).contains(a))
+                    cv::circle(overlay, a, 3, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+            }
+            rms = std::sqrt(sum / count);
+        };
+        render(frame.left_image, calib.K1, calib.D1, rotation_l, rvec_l, tvec_l,
+               frame.left_corners, output.left_overlay, output.left_rms_px);
+        render(frame.right_image, calib.K2, calib.D2, rotation_r, rvec_r, tvec_r,
+               frame.right_corners, output.right_overlay, output.right_rms_px);
+        return true;
+    } catch (const cv::Exception &e) {
+        output = GridReprojection();
+        error_msg = std::string("Grid projection failed: ") + e.what();
+        return false;
+    }
+}
+
 int StereoCalibrator::add_frame(const cv::Mat &left_img,
                                const cv::Mat &right_img,
                                const StereoDetection &detection) {

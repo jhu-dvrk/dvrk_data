@@ -9,11 +9,14 @@
 #include <iostream>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <iterator>
 #include <sstream>
 #include <cassert>
 #include <filesystem>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 int main() {
     std::cout << "[Test] Running automated stereo calibration math verification..." << std::endl;
@@ -125,6 +128,82 @@ int main() {
         return 1;
     }
 
+    // Validate projection with known intrinsics, unequal eyes, distortion and
+    // a nontrivial stereo rotation. Pose must be estimated, not taken from capture.
+    using namespace dvrk_data::calibration;
+    StereoCalibrationResult truth;
+    truth.success = true;
+    truth.image_size = img_size;
+    truth.K1 = K_gt.clone();
+    truth.K2 = K_gt.clone();
+    truth.K2.at<double>(0, 0) = 515.0;
+    cv::Rodrigues(cv::Vec3d(0.01, -0.025, 0.015), truth.R);
+    truth.T = T_gt.clone();
+    for (int parameters : {5, 8}) {
+        truth.D1 = cv::Mat::zeros(1, parameters, CV_64F);
+        truth.D2 = cv::Mat::zeros(1, parameters, CV_64F);
+        D_gt.copyTo(truth.D1.colRange(0, 5));
+        D_gt.copyTo(truth.D2.colRange(0, 5));
+        truth.D2.at<double>(0) = 0.08;
+        if (parameters == 8) {
+            truth.D1.at<double>(5) = 0.012;
+            truth.D2.at<double>(5) = -0.018;
+        }
+        CalibrationFrame sample = calibrator.get_frames()[5];
+        sample.rvec = cv::Vec3d(2, 1, -1); // Intentionally wrong capture-time pose.
+        sample.pose_valid = true;
+        const auto pose = test_rvecs[5];
+        const cv::Mat translation = (cv::Mat_<double>(3, 1) <<
+            test_tvecs[5][0], test_tvecs[5][1], test_tvecs[5][2]);
+        cv::Mat rotation, right_rotation, right_pose;
+        cv::Rodrigues(pose, rotation);
+        right_rotation = truth.R * rotation;
+        cv::Rodrigues(right_rotation, right_pose);
+        cv::Mat right_translation = truth.R * translation + truth.T;
+        cv::projectPoints(sample.object_points, pose, translation, truth.K1, truth.D1, sample.left_corners);
+        cv::projectPoints(sample.object_points, right_pose, right_translation, truth.K2, truth.D2, sample.right_corners);
+        GridReprojection projection;
+        if (!StereoCalibrator::reproject_grid(sample, charuco_cfg, truth, projection, err) ||
+            projection.left_rms_px > 0.001 || projection.right_rms_px > 0.001 ||
+            projection.left_overlay.size() != img_size ||
+            projection.right_overlay.size() != img_size ||
+            cv::norm(sample.left_image, projection.left_overlay) == 0) {
+            std::cerr << "Known-geometry grid reprojection failed: " << err << std::endl;
+            return 1;
+        }
+        truth.T.at<double>(1) += 1.0;
+        if (!StereoCalibrator::reproject_grid(sample, charuco_cfg, truth, projection, err) ||
+            projection.right_rms_px < 3.0 || projection.left_rms_px > 0.001) {
+            std::cerr << "Grid validation did not expose incorrect stereo translation" << std::endl;
+            return 1;
+        }
+        truth.T.at<double>(1) -= 1.0;
+        sample.right_image = cv::Mat::zeros(120, 160, CV_8UC3);
+        if (StereoCalibrator::reproject_grid(sample, charuco_cfg, truth, projection, err) || err.empty()) {
+            std::cerr << "Grid validation accepted incompatible resolution" << std::endl;
+            return 1;
+        }
+        sample.right_image = sample.left_image;
+        sample.right_corners.pop_back();
+        if (StereoCalibrator::reproject_grid(sample, charuco_cfg, truth, projection, err)) {
+            std::cerr << "Grid validation accepted mismatched correspondences" << std::endl;
+            return 1;
+        }
+        sample.right_corners = sample.left_corners;
+        for (size_t i = 0; i < sample.object_points.size(); ++i)
+            sample.object_points[i] = cv::Point3f(static_cast<float>(i), 0, 0);
+        if (StereoCalibrator::reproject_grid(sample, charuco_cfg, truth, projection, err)) {
+            std::cerr << "Grid validation accepted collinear points" << std::endl;
+            return 1;
+        }
+    }
+    GridReprojection uncalibrated_projection;
+    if (StereoCalibrator::reproject_grid(calibrator.get_frames()[0], charuco_cfg,
+                                         StereoCalibrationResult(), uncalibrated_projection, err)) {
+        std::cerr << "Grid validation accepted missing calibration" << std::endl;
+        return 1;
+    }
+
     // Test saving and loading calibration file
     char temp_pattern[] = "/tmp/dvrk-data-calib-XXXXXX";
     const char *created = mkdtemp(temp_pattern);
@@ -141,6 +220,69 @@ int main() {
         tmp_dir, result);
     if (!save_ros_ok) {
         std::cerr << "Failed to save ROS CameraInfo pair" << std::endl;
+        return 1;
+    }
+
+    // Raw archive preserves pixels, pairing IDs, and exact YAML bytes.
+    auto archive_frames = calibrator.get_frames();
+    archive_frames[0].left_image = cv::Mat(img_size, CV_8UC3, cv::Scalar(17, 39, 212));
+    archive_frames[0].right_image = cv::Mat(img_size, CV_8UC3, cv::Scalar(78, 123, 4));
+    std::string archive_dir, archive_error;
+    if (!CalibrationIO::save_calibration_archive(tmp_dir, archive_frames, charuco_cfg,
+                                                 archive_dir, archive_error)) {
+        std::cerr << "Could not save raw archive: " << archive_error << std::endl;
+        return 1;
+    }
+    auto read_file = [](const std::filesystem::path &path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    };
+    for (const char *file : {"left.yaml", "right.yaml", "stereo_calibration.yaml"}) {
+        if (read_file(std::filesystem::path(tmp_dir) / file).empty() ||
+            read_file(std::filesystem::path(tmp_dir) / file) !=
+            read_file(std::filesystem::path(archive_dir) / file)) {
+            std::cerr << "Archived YAML does not match exported YAML" << std::endl;
+            return 1;
+        }
+    }
+    for (const auto &frame : archive_frames) {
+        std::ostringstream name;
+        name << "sample_" << std::setw(6) << std::setfill('0') << frame.id << ".png";
+        for (const auto &eye : {"left", "right"}) {
+            auto image = cv::imread((std::filesystem::path(archive_dir) / eye / name.str()).string());
+            const auto &original = std::string(eye) == "left" ? frame.left_image : frame.right_image;
+            if (image.size() != original.size() || image.type() != original.type() ||
+                cv::norm(image, original, cv::NORM_INF) != 0) {
+                std::cerr << "Raw image pixels changed during archive" << std::endl;
+                return 1;
+            }
+        }
+    }
+    CharucoConfig archived_board;
+    if (!load_board_config((std::filesystem::path(archive_dir) / "board.json").string(),
+                            archived_board, archive_error) ||
+        archived_board.squares_x != charuco_cfg.squares_x ||
+        archived_board.square_length_mm != charuco_cfg.square_length_mm) {
+        std::cerr << "Archived board configuration mismatch" << std::endl;
+        return 1;
+    }
+    std::string second_archive;
+    if (!CalibrationIO::save_calibration_archive(tmp_dir, archive_frames, charuco_cfg,
+                                                 second_archive, archive_error) || second_archive == archive_dir) {
+        std::cerr << "Repeated save overwrote an archive" << std::endl;
+        return 1;
+    }
+    const auto bad_parent = std::filesystem::path(tmp_dir) / "missing_yaml";
+    std::filesystem::create_directory(bad_parent);
+    std::string failed_archive;
+    if (CalibrationIO::save_calibration_archive(bad_parent.string(), archive_frames, charuco_cfg,
+                                                failed_archive, archive_error) ||
+        archive_error.empty() || !failed_archive.empty() || !std::filesystem::is_empty(bad_parent)) {
+        std::cerr << "Failed archive left incomplete output or reported success" << std::endl;
+        return 1;
+    }
+    if (CalibrationIO::save_calibration_archive(tmp_dir, {}, charuco_cfg, failed_archive, archive_error)) {
+        std::cerr << "Empty calibration set was accepted for archive" << std::endl;
         return 1;
     }
 

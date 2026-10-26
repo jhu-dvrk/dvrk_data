@@ -77,6 +77,12 @@ struct StereoCalibrationResult {
     std::map<int, double> per_frame_error_by_id;
 };
 
+struct GridReprojection {
+    cv::Mat left_overlay, right_overlay;
+    double left_rms_px = 0.0;
+    double right_rms_px = 0.0;
+};
+
 class StereoCalibrator {
 public:
     StereoCalibrator() = default;
@@ -112,6 +118,14 @@ public:
                    StereoCalibrationResult &result,
                    std::string &error_msg,
                    ProgressCallback progress_cb = nullptr);
+
+    /// Fit board pose in the left eye and project the grid into both raw images.
+    /// The right pose uses calibrated R/T, so its residual also checks stereo geometry.
+    static bool reproject_grid(const CalibrationFrame &frame,
+                               const CharucoConfig &board,
+                               const StereoCalibrationResult &calib,
+                               GridReprojection &output,
+                               std::string &error_msg);
 
     /// Rectify a live stereo image pair using precomputed maps
     static void rectify_stereo(const cv::Mat &in_left,

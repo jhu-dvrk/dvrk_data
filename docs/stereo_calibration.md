@@ -60,6 +60,26 @@ The calibrator monitors `/proc/net/unix` and GStreamer bus events continuously:
 - **3D Anaglyph Mode**: Stereo disparity visualization with standard Red-Cyan glasses.
 - **One-Click Outlier Filtering**: Automatically identifies frames whose reprojection error exceeds 1.5x the median error, purges them from the collection, rebuilds coverage, and recalibrates in one click.
 
+### 4. Validate a Captured Pair
+
+After calibration, click any row in the captured samples list. The view switches to
+**Selected Sample: Grid Reprojection** and freezes that left/right pair. Click another
+row to inspect another pair; choose a live view from **View** to resume streaming
+and capture. In the grid view, use the mouse wheel to zoom around the pointer
+(up to 32 times the fitted size), hold the left mouse button and drag to pan, and
+double-click to fit the image again. Switching samples preserves zoom and pan;
+leaving grid validation resets the view.
+
+The green grid is projected onto the original images with lens distortion applied.
+Yellow circles mark detected common ChArUco corners, and red segments show their
+residuals. Left and right RMS residuals are displayed in pixels. The board pose is
+estimated from the selected sample's left corners with the calibrated intrinsics;
+the right projection uses that pose and the calibrated stereo rotation/translation.
+This makes right-eye discrepancies useful for inspecting stereo geometry. These
+samples were used to fit the calibration, so their residuals measure fit, rather
+than independent accuracy on unseen images. Changing the frame collection requires
+recalibration to update the calibration fit.
+
 ---
 
 ## Standalone Rectification Verification
@@ -77,3 +97,17 @@ ros2 run dvrk_data verify_stereo_calibration -c /path/to/stereo_calibration.yaml
 When you click **Save Calibration...**, the tool writes:
 - `left.yaml` and `right.yaml`: Standard ROS 2 CameraInfo configuration (`camera_matrix`, `distortion_coefficients`, `rectification_matrix`, `projection_matrix`).
 - `stereo_calibration.yaml`: Consolidated dVRK configuration with extrinsics ($R, T, E, F$), disparity-to-depth matrix ($Q$), baseline in millimeters, and RMS error metrics.
+
+The save dialog includes **Also save raw calibration images in a dated directory**
+(unchecked by default). Enabling it also creates
+`stereo_calibration_YYYY-MM-DD_HH-MM-SS/` inside the selected output folder, using
+local time. Repeated saves get a numeric suffix when needed. The directory contains:
+
+- Copies of `left.yaml`, `right.yaml`, and `stereo_calibration.yaml`.
+- `board.json` with the board settings.
+- `left/sample_000001.png` and `right/sample_000001.png`, etc., with matching sample
+  IDs from the list. PNG files preserve the original captured pixels without
+  annotations or rectification.
+
+The archive uses the exact sample set from the last successful calibration, even
+if you subsequently add or delete samples. Recalibrate to archive a changed set.

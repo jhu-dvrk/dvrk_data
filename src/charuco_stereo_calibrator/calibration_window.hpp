@@ -23,6 +23,7 @@ enum class DisplayMode {
     LIVE_TRACKING,
     COVERAGE_HEATMAP,
     RECTIFIED_EPIPOLAR,
+    GRID_VALIDATION,
     ANAGLYPH_3D
 };
 
@@ -33,12 +34,23 @@ public:
 
     void set_image(const cv::Mat &bgr_mat);
     void set_active_epipolar_y(int y);
+    void set_navigation_enabled(bool enabled);
 
 protected:
     bool on_draw(const Cairo::RefPtr<Cairo::Context> &cr) override;
     bool on_button_press_event(GdkEventButton *event) override;
+    bool on_button_release_event(GdkEventButton *event) override;
+    bool on_motion_notify_event(GdkEventMotion *event) override;
+    bool on_scroll_event(GdkEventScroll *event) override;
 
 private:
+    void image_transform(double &scale, double &x, double &y) const;
+    void reset_navigation(); // Caller holds m_mutex.
+    bool m_navigation_enabled = false;
+    bool m_dragging = false;
+    double m_zoom = 1.0;
+    double m_pan_x = 0.0, m_pan_y = 0.0;
+    double m_drag_x = 0.0, m_drag_y = 0.0;
     std::mutex m_mutex;
     Glib::RefPtr<Gdk::Pixbuf> m_pixbuf;
     int m_img_width = 0;
@@ -65,6 +77,7 @@ private:
     void on_calib_finished_dispatched();
     void on_save_clicked();
     void on_display_mode_changed();
+    void show_selected_grid();
 
     // Stream frame callback
     void handle_new_frame(const cv::Mat &left, const cv::Mat &right, uint64_t ts);
@@ -89,6 +102,9 @@ private:
     std::unique_ptr<StereoCalibrator> m_calibrator;
 
     StereoCalibrationResult m_calib_result;
+    // Retain the exact inputs of the last successful calibration for export.
+    std::vector<CalibrationFrame> m_pending_calibration_frames;
+    std::vector<CalibrationFrame> m_calibrated_frames;
     DisplayMode m_display_mode = DisplayMode::LIVE_TRACKING;
 
     // Frame synchronization & dispatch
@@ -187,6 +203,7 @@ private:
     Gtk::Box m_display_box;
     Gtk::ComboBoxText m_display_mode_combo;
     Gtk::Button m_save_button;
+    Gtk::Label m_validation_label;
 
     // Asynchronous Background Calibration
     std::atomic<bool> m_is_calibrating{false};

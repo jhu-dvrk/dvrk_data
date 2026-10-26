@@ -4,6 +4,12 @@
 #include "dvrk_data/calibration/calibration_io.hpp"
 
 #include <opencv2/calib3d.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include "dvrk_data/calibration/board_config.hpp"
+#include <ctime>
+#include <set>
+#include <sstream>
+#include <stdexcept>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -63,6 +69,68 @@ bool write_ros_yaml(const std::string &filepath,
 }
 
 } // anonymous namespace
+
+bool CalibrationIO::save_calibration_archive(const std::string &output_dir,
+                                              const std::vector<CalibrationFrame> &frames,
+                                              const CharucoConfig &board,
+                                              std::string &archive_dir,
+                                              std::string &error_msg) {
+    namespace fs = std::filesystem;
+    archive_dir.clear();
+    error_msg.clear();
+    if (frames.empty()) {
+        error_msg = "No calibration samples are available to archive.";
+        return false;
+    }
+    std::set<int> ids;
+    for (const auto &frame : frames) {
+        if (frame.left_image.empty() || frame.right_image.empty() ||
+            !ids.insert(frame.id).second) {
+            error_msg = "Calibration samples contain missing images or duplicate IDs.";
+            return false;
+        }
+    }
+    fs::path created;
+    try {
+        const auto now = std::time(nullptr);
+        std::tm local_time{};
+        if (!localtime_r(&now, &local_time))
+            throw std::runtime_error("Could not determine the local date/time.");
+        std::ostringstream name;
+        name << "stereo_calibration_" << std::put_time(&local_time, "%Y-%m-%d_%H-%M-%S");
+        // create_directory is atomic: repeated saves never overwrite an archive.
+        for (unsigned suffix = 0; ; ++suffix) {
+            auto candidate = fs::path(output_dir) /
+                (name.str() + (suffix ? "_" + std::to_string(suffix) : ""));
+            if (fs::create_directory(candidate)) { created = candidate; break; }
+        }
+        for (const char *file : {"left.yaml", "right.yaml", "stereo_calibration.yaml"})
+            fs::copy_file(fs::path(output_dir) / file, created / file);
+        std::string board_error;
+        if (!save_board_config((created / "board.json").string(), board, board_error))
+            throw std::runtime_error("Could not save board settings: " + board_error);
+        fs::create_directory(created / "left");
+        fs::create_directory(created / "right");
+        for (const auto &frame : frames) {
+            std::ostringstream filename;
+            filename << "sample_" << std::setw(6) << std::setfill('0') << frame.id << ".png";
+            if (!cv::imwrite((created / "left" / filename.str()).string(), frame.left_image) ||
+                !cv::imwrite((created / "right" / filename.str()).string(), frame.right_image))
+                throw std::runtime_error("Could not write raw images for sample " + std::to_string(frame.id));
+        }
+        archive_dir = created.string();
+        return true;
+    } catch (const std::exception &e) {
+        error_msg = e.what();
+        if (!created.empty()) {
+            std::error_code cleanup_error;
+            fs::remove_all(created, cleanup_error);
+            if (cleanup_error)
+                error_msg += "\nIncomplete archive remains at: " + created.string();
+        }
+        return false;
+    }
+}
 
 bool CalibrationIO::save_ros_camera_info_pair(const std::string &output_dir,
                                               const StereoCalibrationResult &result,

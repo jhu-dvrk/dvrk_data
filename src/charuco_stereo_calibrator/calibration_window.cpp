@@ -4,6 +4,8 @@
 #include "calibration_window.hpp"
 
 #include <opencv2/imgproc.hpp>
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -17,7 +19,8 @@ namespace dvrk_data::calibration {
 
 VideoArea::VideoArea() {
     set_size_request(640, 360);
-    add_events(Gdk::BUTTON_PRESS_MASK);
+    add_events(Gdk::BUTTON_PRESS_MASK | Gdk::BUTTON_RELEASE_MASK |
+               Gdk::POINTER_MOTION_MASK | Gdk::SCROLL_MASK | Gdk::SMOOTH_SCROLL_MASK);
 }
 
 void VideoArea::set_image(const cv::Mat &bgr_mat) {
@@ -42,6 +45,7 @@ void VideoArea::set_image(const cv::Mat &bgr_mat) {
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_img_width != rgb.cols || m_img_height != rgb.rows) reset_navigation();
         m_pixbuf = pixbuf;
         m_img_width = rgb.cols;
         m_img_height = rgb.rows;
@@ -54,6 +58,26 @@ void VideoArea::set_active_epipolar_y(int y) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_active_y = y;
     queue_draw();
+}
+
+void VideoArea::reset_navigation() {
+    m_zoom = 1.0;
+    m_pan_x = m_pan_y = 0.0;
+    m_dragging = false;
+}
+
+void VideoArea::set_navigation_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (enabled != m_navigation_enabled) reset_navigation();
+    m_navigation_enabled = enabled;
+    queue_draw();
+}
+
+void VideoArea::image_transform(double &scale, double &x, double &y) const {
+    scale = std::min(static_cast<double>(get_allocated_width()) / m_img_width,
+                     static_cast<double>(get_allocated_height()) / m_img_height) * m_zoom;
+    x = (get_allocated_width() - m_img_width * scale) / 2.0 + m_pan_x;
+    y = (get_allocated_height() - m_img_height * scale) / 2.0 + m_pan_y;
 }
 
 bool VideoArea::on_draw(const Cairo::RefPtr<Cairo::Context> &cr) {
@@ -74,21 +98,20 @@ bool VideoArea::on_draw(const Cairo::RefPtr<Cairo::Context> &cr) {
         return true;
     }
 
-    double scale_x = static_cast<double>(alloc_w) / m_img_width;
-    double scale_y = static_cast<double>(alloc_h) / m_img_height;
-    double scale = std::min(scale_x, scale_y);
-
-    int dest_w = static_cast<int>(m_img_width * scale);
-    int dest_h = static_cast<int>(m_img_height * scale);
-    int dest_x = (alloc_w - dest_w) / 2;
-    int dest_y = (alloc_h - dest_h) / 2;
-
-    auto scaled = m_pixbuf->scale_simple(dest_w, dest_h, Gdk::INTERP_BILINEAR);
-    Gdk::Cairo::set_source_pixbuf(cr, scaled, dest_x, dest_y);
-    cr->paint();
+    double scale, dest_x, dest_y;
+    image_transform(scale, dest_x, dest_y);
+    const double dest_w = m_img_width * scale;
+    // Draw through Cairo's transform; zoom never allocates an enlarged image.
+    cr->save();
+    cr->translate(dest_x, dest_y);
+    cr->scale(scale, scale);
+    Gdk::Cairo::set_source_pixbuf(cr, m_pixbuf, 0, 0);
+    cr->rectangle(0, 0, m_img_width, m_img_height);
+    cr->fill();
+    cr->restore();
 
     // Draw active epipolar guideline if set
-    if (m_active_y >= 0 && m_active_y < m_img_height) {
+    if (!m_navigation_enabled && m_active_y >= 0 && m_active_y < m_img_height) {
         int screen_y = dest_y + static_cast<int>(m_active_y * scale);
         cr->set_source_rgb(1.0, 1.0, 0.0); // Bright Yellow
         cr->set_line_width(2.0);
@@ -104,20 +127,74 @@ bool VideoArea::on_button_press_event(GdkEventButton *event) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_pixbuf || m_img_width <= 0 || m_img_height <= 0) return false;
 
-    int alloc_w = get_allocated_width();
-    int alloc_h = get_allocated_height();
-    double scale = std::min(static_cast<double>(alloc_w) / m_img_width,
-                            static_cast<double>(alloc_h) / m_img_height);
-
-    int dest_h = static_cast<int>(m_img_height * scale);
-    int dest_y = (alloc_h - dest_h) / 2;
-
-    int clicked_img_y = static_cast<int>((event->y - dest_y) / scale);
-    if (clicked_img_y >= 0 && clicked_img_y < m_img_height) {
+    if (event->button != 1) return false;
+    if (m_navigation_enabled) {
+        if (event->type == GDK_2BUTTON_PRESS) {
+            reset_navigation();
+            queue_draw();
+        } else {
+            m_dragging = true;
+            m_drag_x = event->x;
+            m_drag_y = event->y;
+        }
+        return true;
+    }
+    double scale, dest_x, dest_y;
+    image_transform(scale, dest_x, dest_y);
+    const int clicked_img_y = static_cast<int>((event->y - dest_y) / scale);
+    if (event->x >= dest_x && event->x < dest_x + m_img_width * scale &&
+        event->y >= dest_y && clicked_img_y < m_img_height) {
         m_active_y = clicked_img_y;
         queue_draw();
     }
+    return true;
+}
 
+bool VideoArea::on_button_release_event(GdkEventButton *event) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_navigation_enabled || event->button != 1) return false;
+    m_dragging = false;
+    return true;
+}
+
+bool VideoArea::on_motion_notify_event(GdkEventMotion *event) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_navigation_enabled || !m_dragging) return false;
+    if (!(event->state & GDK_BUTTON1_MASK)) {
+        m_dragging = false;
+        return false;
+    }
+    m_pan_x += event->x - m_drag_x;
+    m_pan_y += event->y - m_drag_y;
+    m_drag_x = event->x;
+    m_drag_y = event->y;
+    queue_draw();
+    return true;
+}
+
+bool VideoArea::on_scroll_event(GdkEventScroll *event) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_navigation_enabled || !m_pixbuf || m_img_width <= 0 || m_img_height <= 0)
+        return false;
+    double delta = 0;
+    if (event->direction == GDK_SCROLL_UP) delta = -1;
+    else if (event->direction == GDK_SCROLL_DOWN) delta = 1;
+    else if (event->direction == GDK_SCROLL_SMOOTH) delta = event->delta_y;
+    if (!std::isfinite(delta) || delta == 0) return true;
+    double old_scale, old_x, old_y;
+    image_transform(old_scale, old_x, old_y);
+    if (old_scale <= 0) return true;
+    m_zoom = std::clamp(m_zoom * std::pow(1.2, std::clamp(-delta, -20.0, 20.0)), 1.0, 32.0);
+    if (m_zoom == 1.0) {
+        reset_navigation();
+    } else {
+        double new_scale, new_x, new_y;
+        image_transform(new_scale, new_x, new_y);
+        // Keep the image point beneath the mouse fixed while zooming.
+        m_pan_x += event->x - ((event->x - old_x) * new_scale / old_scale + new_x);
+        m_pan_y += event->y - ((event->y - old_y) * new_scale / old_scale + new_y);
+    }
+    queue_draw();
     return true;
 }
 
@@ -293,6 +370,28 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_frames_tree_view.append_column("ID", m_frame_cols.col_id);
     m_frames_tree_view.append_column("Corners", m_frame_cols.col_corners);
     m_frames_tree_view.append_column("Error (px)", m_frame_cols.col_error);
+    m_frames_tree_view.get_selection()->signal_changed().connect([this] {
+        if (m_calib_result.success && !m_is_calibrating.load() &&
+            m_frames_tree_view.get_selection()->get_selected()) {
+            if (m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
+            else m_display_mode_combo.set_active_id("validation");
+        } else if (m_display_mode == DisplayMode::GRID_VALIDATION) {
+            show_selected_grid();
+        }
+    });
+
+    // A click on an already selected row should also reopen validation.
+    m_frames_tree_view.signal_button_release_event().connect([this](GdkEventButton *event) {
+        if (event->button != 1 || m_is_calibrating.load() || !m_calib_result.success)
+            return false;
+        Gtk::TreeModel::Path path;
+        if (m_frames_tree_view.get_path_at_pos(static_cast<int>(event->x),
+                                              static_cast<int>(event->y), path)) {
+            if (m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
+            else m_display_mode_combo.set_active_id("validation");
+        }
+        return false;
+    });
 
     m_frames_list_scroll.set_policy(Gtk::POLICY_NEVER, Gtk::POLICY_AUTOMATIC);
     m_frames_list_scroll.set_size_request(-1, 100);
@@ -357,10 +456,16 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_display_mode_combo.append("heatmap", "Coverage Heatmap Overlay");
     m_display_mode_combo.append("rectified", "Rectified Stereo (Epipolar)");
     m_display_mode_combo.append("anaglyph", "Red-Cyan 3D Anaglyph");
+    m_display_mode_combo.append("validation", "Selected Sample: Grid Reprojection");
     m_display_mode_combo.set_active_id("tracking");
     m_display_mode_combo.signal_changed().connect(sigc::mem_fun(*this, &CalibrationWindow::on_display_mode_changed));
     view_box->pack_start(m_display_mode_combo, Gtk::PACK_EXPAND_WIDGET);
     m_display_box.pack_start(*view_box, Gtk::PACK_SHRINK);
+
+    m_validation_label.set_text("After calibration, click a sample to validate its grid.");
+    m_validation_label.set_line_wrap(true);
+    m_validation_label.set_alignment(0.0, 0.5);
+    m_display_box.pack_start(m_validation_label, Gtk::PACK_SHRINK);
 
     m_save_button.set_sensitive(false);
     m_save_button.signal_clicked().connect(sigc::mem_fun(*this, &CalibrationWindow::on_save_clicked));
@@ -416,7 +521,7 @@ void CalibrationWindow::handle_new_frame(const cv::Mat &left, const cv::Mat &rig
 }
 
 void CalibrationWindow::on_frame_dispatched() {
-    if (m_is_calibrating.load()) {
+    if (m_is_calibrating.load() || m_display_mode == DisplayMode::GRID_VALIDATION) {
         return;
     }
 
@@ -622,13 +727,16 @@ void CalibrationWindow::on_clear_frames_clicked() {
     m_frames_count_label.set_text("Captured Frames: 0");
     m_big_samples_label.set_markup("<span font_weight='bold' font_size='xx-large'>Samples: 0</span>");
     m_calib_result = StereoCalibrationResult();
+    m_calibrated_frames.clear();
+    m_pending_calibration_frames.clear();
     m_rms_label.set_markup("RMS Reprojection Error: <b>--</b>");
     m_baseline_label.set_markup("Baseline: <b>--</b>");
     m_epipolar_err_label.set_markup("Vertical Disparity Error: <b>--</b>");
     m_save_button.set_sensitive(false);
     m_filter_outliers_button.set_sensitive(false);
     if (m_display_mode_combo.get_active_id() == "rectified" ||
-        m_display_mode_combo.get_active_id() == "anaglyph") {
+        m_display_mode_combo.get_active_id() == "anaglyph" ||
+        m_display_mode_combo.get_active_id() == "validation") {
         m_display_mode_combo.set_active_id("tracking");
     }
     update_coverage_ui();
@@ -652,7 +760,9 @@ void CalibrationWindow::on_calibrate_clicked() {
         m_calib_thread.join();
     }
 
+    m_pending_calibration_frames = m_calibrator->get_frames();
     m_is_calibrating = true;
+    m_display_mode_combo.set_sensitive(false);
     m_calibrate_button.set_sensitive(false);
     m_filter_outliers_button.set_sensitive(false);
     m_dist_model_combo.set_sensitive(false);
@@ -713,6 +823,7 @@ void CalibrationWindow::on_calib_finished_dispatched() {
         m_calib_thread.join();
     }
     m_is_calibrating = false;
+    m_display_mode_combo.set_sensitive(true);
 
     bool ok = false;
     StereoCalibrationResult result;
@@ -724,6 +835,7 @@ void CalibrationWindow::on_calib_finished_dispatched() {
         err_msg = m_calib_done_error;
     }
 
+    if (!ok) m_pending_calibration_frames.clear();
     m_calibrate_button.set_sensitive(true);
     m_dist_model_combo.set_sensitive(true);
     m_capture_button.set_sensitive(true);
@@ -733,6 +845,7 @@ void CalibrationWindow::on_calib_finished_dispatched() {
 
     if (ok) {
         m_calib_result = result;
+        m_calibrated_frames = std::move(m_pending_calibration_frames);
         m_calib_progress_bar.set_fraction(1.0);
         m_calib_progress_bar.set_text("Calibration Complete (100%)");
         m_big_status_label.set_markup("<span font_weight='bold' font_size='xx-large' foreground='#28a745'>CALIBRATION SUCCESSFUL!</span>");
@@ -884,6 +997,10 @@ void CalibrationWindow::on_save_clicked() {
                                   Gtk::FILE_CHOOSER_ACTION_SELECT_FOLDER);
     dialog.add_button("Cancel", Gtk::RESPONSE_CANCEL);
     dialog.add_button("Save", Gtk::RESPONSE_OK);
+    Gtk::CheckButton save_raw_check("Also save raw calibration images in a dated directory");
+    save_raw_check.set_active(false);
+    save_raw_check.show();
+    dialog.set_extra_widget(save_raw_check);
 
     if (dialog.run() == Gtk::RESPONSE_OK) {
         std::string folder = dialog.get_filename();
@@ -895,15 +1012,26 @@ void CalibrationWindow::on_save_clicked() {
         std::string dvrk_file = (std::filesystem::path(folder) / "stereo_calibration.yaml").string();
         bool dvrk_ok = CalibrationIO::save_stereo_calibration_file(dvrk_file, m_calib_result);
 
-        if (ros_ok && dvrk_ok) {
+        std::string archive_dir, archive_error;
+        bool archive_ok = true;
+        if (ros_ok && dvrk_ok && save_raw_check.get_active()) {
+            archive_ok = CalibrationIO::save_calibration_archive(
+                folder, m_calibrated_frames, m_charuco_config, archive_dir, archive_error);
+        }
+
+        if (ros_ok && dvrk_ok && archive_ok) {
             Gtk::MessageDialog success_dialog(*this, "Calibration Saved", false,
                                               Gtk::MESSAGE_INFO, Gtk::BUTTONS_OK);
-            success_dialog.set_secondary_text("Exported left.yaml, right.yaml, and stereo_calibration.yaml to:\n" + folder);
+            std::string message = "Exported left.yaml, right.yaml, and stereo_calibration.yaml to:\n" + folder;
+            if (!archive_dir.empty()) message += "\n\nRaw calibration images, board.json, and YAML copies saved to:\n" + archive_dir;
+            success_dialog.set_secondary_text(message);
             success_dialog.run();
         } else {
             Gtk::MessageDialog err_dialog(*this, "Save Failed", false,
                                           Gtk::MESSAGE_ERROR, Gtk::BUTTONS_OK);
-            err_dialog.set_secondary_text("Failed to write calibration files to: " + folder);
+            err_dialog.set_secondary_text(ros_ok && dvrk_ok
+                ? "Calibration YAML files were saved, but the raw image archive failed:\n" + archive_error
+                : "Failed to write calibration files to: " + folder);
             err_dialog.run();
         }
     }
@@ -911,7 +1039,15 @@ void CalibrationWindow::on_save_clicked() {
 
 void CalibrationWindow::on_display_mode_changed() {
     std::string id = m_display_mode_combo.get_active_id();
-    if (id == "heatmap") {
+    m_video_area.set_navigation_enabled(id == "validation");
+    m_capture_button.set_sensitive(!m_is_calibrating.load() && id != "validation");
+    if (id != "validation")
+        m_validation_label.set_text("After calibration, click a sample to validate its grid.");
+    if (id == "validation") {
+        m_display_mode = DisplayMode::GRID_VALIDATION;
+        m_video_area.set_active_epipolar_y(-1);
+        show_selected_grid();
+    } else if (id == "heatmap") {
         m_display_mode = DisplayMode::COVERAGE_HEATMAP;
     } else if (id == "rectified") {
         m_display_mode = DisplayMode::RECTIFIED_EPIPOLAR;
@@ -920,6 +1056,43 @@ void CalibrationWindow::on_display_mode_changed() {
     } else {
         m_display_mode = DisplayMode::LIVE_TRACKING;
     }
+}
+
+void CalibrationWindow::show_selected_grid() {
+    if (m_is_calibrating.load()) return;
+    auto selected = m_frames_tree_view.get_selection()->get_selected();
+    if (!m_calib_result.success || !selected) {
+        m_validation_label.set_text(m_calib_result.success
+            ? "Select a sample in the captured frames list."
+            : "Run stereo calibration, then click a sample to validate its grid.");
+        cv::Mat blank(360, 1280, CV_8UC3, cv::Scalar(16, 16, 16));
+        m_video_area.set_image(blank);
+        return;
+    }
+    const int id = (*selected)[m_frame_cols.col_id];
+    const auto &frames = m_calibrator->get_frames();
+    const auto it = std::find_if(frames.begin(), frames.end(),
+                                 [id](const CalibrationFrame &frame) { return frame.id == id; });
+    if (it == frames.end()) return;
+    GridReprojection projection;
+    std::string error;
+    cv::Mat display;
+    if (StereoCalibrator::reproject_grid(*it, m_charuco_config, m_calib_result, projection, error)) {
+        cv::hconcat(projection.left_overlay, projection.right_overlay, display);
+        std::ostringstream ss;
+        ss << "Sample #" << id << " | RMS L: " << std::fixed << std::setprecision(3)
+           << projection.left_rms_px << " px, R: " << projection.right_rms_px
+           << " px\nGreen: projected grid. Yellow: detected corners. Red: residuals."
+           << "\nPose fitted in left eye; right uses stereo R/T."
+           << "\nWheel: zoom. Left drag: pan. Double-click: fit.";
+        m_validation_label.set_text(ss.str());
+    } else {
+        cv::hconcat(it->left_image, it->right_image, display);
+        m_validation_label.set_text(error);
+    }
+    m_video_area.set_image(display);
+    m_big_status_label.set_markup("<span font_weight='bold' font_size='xx-large' foreground='#007bff'>VALIDATING SAMPLE #" +
+                                  std::to_string(id) + "</span>");
 }
 
 void CalibrationWindow::update_coverage_ui() {
@@ -965,7 +1138,7 @@ void CalibrationWindow::update_calib_status_ui() {
 bool CalibrationWindow::on_timer_tick() {
     update_stats_ui();
 
-    if (m_is_calibrating.load()) {
+    if (m_is_calibrating.load() || m_display_mode == DisplayMode::GRID_VALIDATION) {
         return true;
     }
 
