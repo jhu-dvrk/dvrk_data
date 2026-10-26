@@ -251,8 +251,6 @@ install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
-install(DIRECTORY docs LICENSES DESTINATION share/${PROJECT_NAME})
-
 install(DIRECTORY share/
   DESTINATION share/${PROJECT_NAME}
 )
