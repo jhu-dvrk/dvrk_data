@@ -157,7 +157,7 @@ def convert_encord_to_tags(encord_path, sidecar_path, output_path=None):
     print(f"Generated {len(stages)} stages in {output_path}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Convert Encord JSON export to project tag format.')
+    parser = argparse.ArgumentParser(allow_abbrev=False, description='Convert Encord JSON export to project tag format.')
     parser.add_argument('--encord', '-e', required=True, help='Path to Encord JSON file')
     parser.add_argument('--sidecar', '-s', required=True, help='Path to video sidecar JSON file')
     parser.add_argument('--output', '-o', help='Path to output tag file (default: inferred from data_title or sidecar name)')

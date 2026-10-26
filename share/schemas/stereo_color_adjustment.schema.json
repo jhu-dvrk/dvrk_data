@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dvrk_data:stereo_color_adjustment@1.0.0",
+  "title": "Shared stereo color correction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "left",
+    "right"
+  ],
+  "properties": {
+    "type": {
+      "const": "dvrk_data:stereo_color_adjustment@1.0.0"
+    },
+    "left": {
+      "$ref": "#/$defs/color"
+    },
+    "right": {
+      "$ref": "#/$defs/color"
+    }
+  },
+  "$defs": {
+    "color": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "brightness": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0.0
+        },
+        "contrast": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "default": 1.0
+        },
+        "saturation": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "default": 1.0
+        },
+        "hue": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0.0
+        }
+      }
+    }
+  }
+}

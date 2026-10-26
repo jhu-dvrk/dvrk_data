@@ -1,0 +1,10 @@
+{
+  "type": "dvrk_data:stereo_rectify@1.0.0",
+  "calibration_file": "stereo_calibration.yaml",
+  "backend": "cpu",
+  "gst_input": "@dvrk:stereo_source:stereo",
+  "gst_output": "@dvrk:stereo_rectify:stereo",
+  "camera": {
+    "size": "auto"
+  }
+}

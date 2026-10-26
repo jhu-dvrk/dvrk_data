@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <dvrk_data/config.hpp>
+#include <dvrk_data/color_adjustment.hpp>
 #include <dvrk_data/cpu_timestamp_meta.hpp>
 #include <dvrk_data/latest_video.hpp>
 #include <dvrk_data/dvrk_gst_socket.hpp>
@@ -24,6 +25,8 @@ namespace {
 
 struct CommandLineOptions {
   std::string config_file;
+  std::string input;
+  std::string color_file;
 };
 
 struct CropValues {
@@ -34,7 +37,7 @@ struct CropValues {
 };
 
 void print_usage(const char *executable) {
-  std::cerr << "Usage: " << executable << " -c <config.json>" << std::endl;
+  std::cerr << "Usage: " << executable << " -c <config.json> [-i|--input <stereo>] [--color-adjustment <file.json>]" << std::endl;
 }
 
 bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
@@ -45,7 +48,7 @@ bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
       break;
     }
 
-    if (arg == "-c" && i + 1 < argc) {
+    if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
       if (seen_config) {
         std::cerr << "Error: multiple -c arguments are not supported."
                   << std::endl;
@@ -56,6 +59,15 @@ bool parse_arguments(int argc, char *argv[], CommandLineOptions &options) {
       continue;
     }
 
+    if ((arg == "-i" || arg == "--input") && i + 1 < argc && options.input.empty()) {
+      options.input = argv[++i];
+      continue;
+    }
+    if (arg == "--color-adjustment" && i + 1 < argc && options.color_file.empty()) {
+      options.color_file = argv[++i];
+      continue;
+    }
+    if (arg == "-h" || arg == "--help") { print_usage(argv[0]); std::exit(0); }
     std::cerr << "Error: unknown argument '" << arg << "'." << std::endl;
     return false;
   }
@@ -259,19 +271,14 @@ std::string build_pipeline_string(const dvrk_data::AppConfig &cfg) {
                    ",height=" + std::to_string(cfg.original_height);
   }
 
-  const bool stereo_input = !cfg.stereo.gst_input.empty();
-  const std::string input_chain = stereo_input
-      ? cfg.stereo.gst_input +
-        " ! queue name=__raw_stereo_q__ max-size-buffers=1 leaky=downstream"
-        " ! tee name=__raw_stereo__ " : "";
-  const std::string left_input = stereo_input
-      ? "__raw_stereo__. ! queue max-size-buffers=1 leaky=downstream"
-        " ! videocrop left=0 right=" + std::to_string(cfg.original_width) +
-        " ! video/x-raw,width=" + std::to_string(cfg.original_width) : cfg.left.gst_input;
-  const std::string right_input = stereo_input
-      ? "__raw_stereo__. ! queue max-size-buffers=1 leaky=downstream"
-        " ! videocrop left=" + std::to_string(cfg.original_width) + " right=0"
-        " ! video/x-raw,width=" + std::to_string(cfg.original_width) : cfg.right.gst_input;
+  const std::string input_chain = cfg.stereo.gst_input +
+      " ! queue name=__raw_stereo_q__ max-size-buffers=1 leaky=downstream ! tee name=__raw_stereo__ ";
+  const std::string left_input = "__raw_stereo__. ! queue max-size-buffers=1 leaky=downstream"
+      " ! videocrop left=0 right=" + std::to_string(cfg.original_width) +
+      " ! video/x-raw,width=" + std::to_string(cfg.original_width);
+  const std::string right_input = "__raw_stereo__. ! queue max-size-buffers=1 leaky=downstream"
+      " ! videocrop left=" + std::to_string(cfg.original_width) + " right=0"
+      " ! video/x-raw,width=" + std::to_string(cfg.original_width);
   const std::string left_chain =
       left_input +
       " ! queue name=__left_src_q__ max-size-buffers=1 max-size-time=0 "
@@ -361,21 +368,20 @@ int main(int argc, char *argv[]) {
   dvrk_data::AppConfig cfg;
   try {
     cfg = dvrk_data::Config::parse_app_config(root);
+    if (!options.input.empty()) cfg.stereo.gst_input = options.input;
+    const auto loaded_color = dvrk_data::load_stereo_color_adjustment(cfg, path, options.color_file);
+    RCLCPP_INFO(node->get_logger(), "Color adjustment: %s", loaded_color.empty() ? "neutral (no shared file)" : loaded_color.c_str());
   } catch (const std::exception &e) {
     RCLCPP_ERROR(node->get_logger(), "%s", e.what());
     rclcpp::shutdown();
     return 1;
   }
 
-  const bool has_left_input = !cfg.left.gst_input.empty();
-  const bool has_right_input = !cfg.right.gst_input.empty();
-  if (has_left_input != has_right_input ||
-      (!cfg.stereo.gst_input.empty() && has_left_input)) {
-    RCLCPP_ERROR(node->get_logger(),
-                 "Specify either one stereo gst_input or both camera eye inputs");
+  if (!cfg.left.gst_input.empty() || !cfg.right.gst_input.empty()) {
+    RCLCPP_ERROR(node->get_logger(), "Only combined side-by-side stereo is supported; use root gst_input or -i/--input");
     rclcpp::shutdown(); return 1;
   }
-  if (!has_left_input && cfg.stereo.gst_input.empty())
+  if (cfg.stereo.gst_input.empty())
     cfg.stereo.gst_input = dvrk_gst::make(dvrk_gst::ROLE_STEREO_SOURCE, "stereo");
 
   if ((!cfg.auto_camera_size &&
@@ -392,22 +398,9 @@ int main(int argc, char *argv[]) {
   if (!cfg.stereo.gst_output_specified)
     cfg.stereo.gst_output = dvrk_gst::make(
         dvrk_gst::ROLE_STEREO_ALIGNMENT, "stereo");
-  if (!cfg.stereo.gst_input.empty())
-    cfg.stereo.gst_input = dvrk_gst::build_input(
-        cfg.stereo.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
-  else {
-    cfg.left.gst_input = dvrk_gst::build_input(
-        cfg.left.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
-    cfg.right.gst_input = dvrk_gst::build_input(
-        cfg.right.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
-  }
-
+  cfg.stereo.gst_input = dvrk_gst::build_input(cfg.stereo.gst_input, dvrk_gst::ROLE_STEREO_SOURCE);
   dvrk_video::Size calibrated_size{cfg.original_width, cfg.original_height};
-  const std::vector<std::pair<const char *, std::string>> inputs =
-      !cfg.stereo.gst_input.empty()
-          ? std::vector<std::pair<const char *, std::string>>{{"stereo", cfg.stereo.gst_input}}
-          : std::vector<std::pair<const char *, std::string>>{{"left", cfg.left.gst_input},
-                                                              {"right", cfg.right.gst_input}};
+  const std::vector<std::pair<const char *, std::string>> inputs{{"stereo", cfg.stereo.gst_input}};
   for (const auto &input : inputs) {
     RCLCPP_INFO(node->get_logger(), "Waiting for %s camera dimensions", input.first);
     const auto result = dvrk_video::probe_input_size(
@@ -514,7 +507,7 @@ int main(int argc, char *argv[]) {
       video_caps_failed = true;
       RCLCPP_ERROR(node->get_logger(), "%s; recalibrate for the detected size",
                    message.c_str());
-      g_main_context_invoke(nullptr, [](gpointer) -> gboolean {
+      g_idle_add([](gpointer) -> gboolean {
         if (dc_stereo::g_main_loop) g_main_loop_quit(dc_stereo::g_main_loop);
         return G_SOURCE_REMOVE;
       }, nullptr);
@@ -523,6 +516,11 @@ int main(int argc, char *argv[]) {
   };
   auto left_caps = make_monitor("left");
   auto right_caps = make_monitor("right");
+  auto stereo_caps = make_monitor("stereo");
+  stereo_caps.expected.width *= 2;
+  if (!dvrk_video::add_caps_monitor(pipeline, "__raw_stereo_q__", &stereo_caps)) {
+    latest.stop(); gst_object_unref(pipeline); rclcpp::shutdown(); return 1;
+  }
   if (!dvrk_video::add_caps_monitor(pipeline, "__left_src_q__", &left_caps) ||
       !dvrk_video::add_caps_monitor(pipeline, "__right_src_q__", &right_caps)) {
     RCLCPP_ERROR(node->get_logger(), "Cannot monitor stereo alignment input caps");

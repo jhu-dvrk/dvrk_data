@@ -23,6 +23,8 @@ Fixed roles
     Camera capture (produces ``left`` / ``right`` frames).
 ``stereo_alignment``
     Alignment / compositing (consumes ``left`` + ``right``, produces ``stereo``).
+``stereo_rectify``
+    Calibrated undistortion and rectification (produces ``stereo``).
 ``stereo_display``
     Display app (produces ``stereo`` / ``overlay`` for downstream consumers).
 
@@ -47,6 +49,7 @@ from pathlib import Path
 
 ROLE_STEREO_SOURCE    = "stereo_source"
 ROLE_STEREO_ALIGNMENT = "stereo_alignment"
+ROLE_STEREO_RECTIFY   = "stereo_rectify"
 ROLE_STEREO_DISPLAY   = "stereo_display"
 
 PREFIX = "@dvrk:"

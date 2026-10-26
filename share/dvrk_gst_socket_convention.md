@@ -15,7 +15,8 @@ The fixed roles are:
 | Role | Inputs | Outputs |
 | --- | --- | --- |
 | `stereo_source` | camera pipelines | `left`, `right` |
-| `stereo_alignment` | source `left`, `right` | `stereo` |
+| `stereo_alignment` | source `left`, `right` or combined stereo | `stereo` |
+| `stereo_rectify` | source `left`, `right` or combined stereo | calibrated `stereo` |
 | `stereo_display` | aligned `stereo` | optional `stereo`, `overlay` |
 
 ## JSON fields

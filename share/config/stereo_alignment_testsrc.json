@@ -6,12 +6,6 @@
       "width": 640,
       "height": 480
     },
-    "left": {
-      "gst_input": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
-    },
-    "right": {
-      "gst_input": "videotestsrc pattern=ball is-live=true ! video/x-raw,width=640,height=480,framerate=30/1"
-    },
     "crop": {
       "width": 640,
       "height": 480
@@ -21,5 +15,6 @@
       "vertical_shift_px": 0
     }
   },
-  "gst_output": "@dvrk:stereo_alignment:stereo"
+  "gst_output": "@dvrk:stereo_alignment:stereo",
+  "gst_input": "videotestsrc pattern=smpte is-live=true ! video/x-raw,width=1280,height=480,framerate=30/1"
 }

@@ -5,7 +5,7 @@ gscam_socket — launch gscam_node for a dVRK abstract Unix socket.
 Usage
 -----
   gscam_socket                          # list available @dvrk sockets
-  gscam_socket <socket>                 # launch gscam for the given socket
+  gscam_socket -i <socket>                 # launch gscam for the given socket
 
 Socket forms accepted
 ---------------------
@@ -62,14 +62,13 @@ def _resolve(socket_field: str) -> str:
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(allow_abbrev=False, 
         prog="gscam_socket",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "socket",
-        nargs="?",
+        "-i", "--input", dest="socket",
         default=None,
         metavar="SOCKET",
         help=(
@@ -122,8 +121,8 @@ def main():
         print("Available @dvrk sockets:")
         for i, s in enumerate(sockets, 1):
             print(f"  [{i}] {s}")
-        print(f"\nUsage: gscam_socket <socket>")
-        print(f"Example: gscam_socket {sockets[0]}")
+        print(f"\nUsage: gscam_socket -i <socket>")
+        print(f"Example: gscam_socket -i {sockets[0]}")
         sys.exit(0)
 
     # ── Resolve to fully-qualified name ─────────────────────────────────────

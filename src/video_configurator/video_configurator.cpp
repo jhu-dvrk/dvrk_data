@@ -81,6 +81,15 @@ void parse_caps(GstCaps *caps, std::vector<CameraMode>& modes) {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc > 1) {
+        const std::string option = argv[1];
+        if (argc == 2 && (option == "-h" || option == "--help")) {
+            std::cout << "Usage: video_configurator (interactive; no input arguments)\n";
+            return 0;
+        }
+        std::cerr << "Unknown argument: " << option << "\nUse --help for usage.\n";
+        return 1;
+    }
     gst_init(&argc, &argv);
 
     GstDeviceMonitor *monitor = gst_device_monitor_new();

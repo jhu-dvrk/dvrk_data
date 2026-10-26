@@ -130,6 +130,7 @@ def build_source_config(path, sockets):
         {
             "type": "dvrk_data:stereo_source@1.0.0",
             "name": "dvrk_smoke",
+            "gst_output": sockets["source_stereo"],
             "camera": {
                 "size": "auto",
                 "left": {
@@ -156,12 +157,11 @@ def build_alignment_config(path, sockets):
             "type": "dvrk_data:stereo_alignment@1.0.0",
             "name": "dvrk_smoke",
             "gst_output": sockets["stereo"],
+            "gst_input": sockets["source_stereo"],
             "camera": {
                 "size": {"width": 640, "height": 480},
                 "crop": {"width": 640, "height": 480},
                 "alignment": {"horizontal_shift_px": 0, "vertical_shift_px": 0},
-                "left": {"gst_input": sockets["left"]},
-                "right": {"gst_input": sockets["right"]},
             },
         },
     )
@@ -334,7 +334,7 @@ def check_recording_output(output_dir, log_dir, run_extract_check):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run a unixfd-only dVRK data/console smoke test")
+    parser = argparse.ArgumentParser(allow_abbrev=False, description="Run a unixfd-only dVRK data/console smoke test")
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--startup-timeout", type=float, default=10.0)
     parser.add_argument("--output-dir", default="")
@@ -355,9 +355,8 @@ def main():
     record_dir.mkdir(exist_ok=True)
 
     sockets = {
-        "left": make_socket(ROLE_STEREO_SOURCE, "left"),
-        "right": make_socket(ROLE_STEREO_SOURCE, "right"),
-        "stereo": make_socket(ROLE_STEREO_ALIGNMENT, "stereo"),
+        "source_stereo": make_socket(ROLE_STEREO_SOURCE, "smoke_source_" + str(os.getpid())),
+        "stereo": make_socket(ROLE_STEREO_ALIGNMENT, "smoke_aligned_" + str(os.getpid())),
     }
 
     source_config = root / "stereo_source.json"
@@ -373,8 +372,7 @@ def main():
     try:
         source_cmd = find_sibling_executable("stereo_source") + ["-c", str(source_config)]
         processes.append(run_process("stereo_source", source_cmd, log_dir))
-        wait_for_socket(sockets["left"], args.startup_timeout, "left source socket", processes[-1])
-        wait_for_socket(sockets["right"], args.startup_timeout, "right source socket", processes[-1])
+        wait_for_socket(sockets["source_stereo"], args.startup_timeout, "stereo source socket", processes[-1])
 
         alignment_cmd = find_sibling_executable("stereo_alignment") + ["-c", str(alignment_config)]
         processes.append(run_process("stereo_alignment", alignment_cmd, log_dir))

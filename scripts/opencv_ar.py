@@ -19,7 +19,7 @@ def main():
     left_socket  = dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "left_ar")
     right_socket = dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "right_ar")
 
-    parser = argparse.ArgumentParser(description="OpenCV-based 3D AR Overlay source for dVRK console")
+    parser = argparse.ArgumentParser(allow_abbrev=False, description="OpenCV-based 3D AR Overlay source for dVRK console")
     parser.add_argument("-w", "--width", type=int, default=640, help="Width of frame (default: 640)")
     parser.add_argument("-H", "--height", type=int, default=480, help="Height of frame (default: 480)")
 

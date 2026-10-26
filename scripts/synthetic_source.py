@@ -166,7 +166,7 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-    parser = argparse.ArgumentParser(description="Synthetic unixfd stereo source with a ROS correlation topic")
+    parser = argparse.ArgumentParser(allow_abbrev=False, description="Synthetic unixfd stereo source with a ROS correlation topic")
     parser.add_argument("--left-socket",
                         default=dvrk_gst.make(dvrk_gst.ROLE_STEREO_SOURCE, "left"),
                         help="Abstract socket name for left stream (default: @dvrk:stereo_source:left)")

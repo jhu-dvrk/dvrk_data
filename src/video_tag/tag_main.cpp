@@ -23,6 +23,12 @@ int main(int argc, char* argv[]) {
             tags_file = argv[++i];
         } else if (arg == "-T") {
             load_session_tags = true;
+        } else if (arg == "-h" || arg == "--help") {
+            std::cout << "Usage: video_tag -v <video_file> [-c <config_file>] [-t <tags_file>] [-T]\n";
+            return 0;
+        } else {
+            std::cerr << "Unknown argument or missing option value: " << arg << std::endl;
+            return 1;
         }
     }
 

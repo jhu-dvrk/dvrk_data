@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dvrk_data:stereo_rectify@1.0.0",
+  "title": "Calibrated stereo rectification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "calibration_file"
+  ],
+  "properties": {
+    "type": {
+      "const": "dvrk_data:stereo_rectify@1.0.0"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "calibration_file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path or path relative to this JSON file. The imported stereo calibration file format is unchanged."
+    },
+    "backend": {
+      "const": "cpu",
+      "default": "cpu"
+    },
+    "gst_input": {
+      "type": "string",
+      "minLength": 1
+    },
+    "gst_output": {
+      "type": "string",
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "pattern": "^@dvrk:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$"
+        }
+      ]
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "size": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "$ref": "#/$defs/size"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 2
+        }
+      }
+    }
+  }
+}

@@ -4,62 +4,88 @@
   "title": "dVRK stereo alignment configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["type", "camera"],
+  "required": [
+    "type",
+    "camera"
+  ],
   "properties": {
-    "type": { "const": "dvrk_data:stereo_alignment@1.0.0" },
-    "name": { "type": "string", "minLength": 1, "default": "dvrk_display" },
-    "gst_output": { "$ref": "#/$defs/gstOutput" },
-    "preserve_size": { "type": "boolean", "default": true },
+    "type": {
+      "const": "dvrk_data:stereo_alignment@1.0.0"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "default": "dvrk_display"
+    },
+    "gst_output": {
+      "$ref": "#/$defs/gstOutput"
+    },
+    "preserve_size": {
+      "type": "boolean",
+      "default": true
+    },
     "camera": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["size", "left", "right", "crop"],
+      "required": [
+        "size",
+        "crop"
+      ],
       "properties": {
         "size": {
           "description": "Use 'auto' to detect incoming camera caps, or specify a fixed size for pixel-based crop and shift calibration.",
-          "oneOf": [{ "const": "auto" }, { "$ref": "#/$defs/size" }]
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "$ref": "#/$defs/size"
+            }
+          ]
         },
-        "left": { "$ref": "#/$defs/cameraEndpoint" },
-        "right": { "$ref": "#/$defs/cameraEndpoint" },
-        "crop": { "$ref": "#/$defs/size" },
+        "crop": {
+          "$ref": "#/$defs/size"
+        },
         "alignment": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "horizontal_shift_px": { "type": "integer", "default": 0, "description": "Per-camera horizontal crop alignment in input pixels; positive increases crossed disparity. This does not change physical camera baseline." },
-            "vertical_shift_px": { "type": "integer", "default": 0, "description": "Per-camera vertical crop alignment in input pixels." }
+            "horizontal_shift_px": {
+              "type": "integer",
+              "default": 0,
+              "description": "Per-camera horizontal crop alignment in input pixels; positive increases crossed disparity. This does not change physical camera baseline."
+            },
+            "vertical_shift_px": {
+              "type": "integer",
+              "default": 0,
+              "description": "Per-camera vertical crop alignment in input pixels."
+            }
           }
         }
       }
     },
-    "gst_input": { "$ref": "#/$defs/gstInput", "description": "Combined LR input; defaults to @dvrk:stereo_source:stereo when separate eye inputs are omitted." }
+    "gst_input": {
+      "$ref": "#/$defs/gstInput",
+      "description": "Combined left-right stereo input; defaults to @dvrk:stereo_source:stereo."
+    }
   },
   "$defs": {
     "size": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["width", "height"],
+      "required": [
+        "width",
+        "height"
+      ],
       "properties": {
-        "width": { "type": "integer", "minimum": 1 },
-        "height": { "type": "integer", "minimum": 1 }
-      }
-    },
-    "color": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "brightness": { "type": "number", "default": 0.0 },
-        "contrast": { "type": "number", "default": 1.0 },
-        "saturation": { "type": "number", "default": 1.0 },
-        "hue": { "type": "number", "default": 0.0 }
-      }
-    },
-    "cameraEndpoint": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "gst_input": { "$ref": "#/$defs/gstInput" },
-        "color": { "$ref": "#/$defs/color" }
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "gstInput": {
@@ -70,8 +96,12 @@
     "gstOutput": {
       "type": "string",
       "anyOf": [
-        { "const": "" },
-        { "pattern": "^@dvrk:[^:]+:[^:]+$" }
+        {
+          "const": ""
+        },
+        {
+          "pattern": "^@dvrk:[^:]+:[^:]+$"
+        }
       ],
       "description": "Canonical dVRK abstract socket reference."
     }

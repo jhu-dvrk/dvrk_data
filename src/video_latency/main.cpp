@@ -329,17 +329,22 @@ protected:
 
 int main(int argc, char* argv[]) {
     gst_init(&argc, &argv);
-    Gtk::Main kit(argc, argv);
 
     std::string config_path;
     std::string stream_name;
 
     for(int i=1; i<argc; ++i) {
         std::string arg = argv[i];
-        if(arg == "-c" && i+1 < argc) {
+        if((arg == "-c" || arg == "--config") && i+1 < argc) {
             config_path = argv[++i];
-        } else if(arg == "-s" && i+1 < argc) {
+        } else if((arg == "-s" || arg == "--stream") && i+1 < argc) {
             stream_name = argv[++i];
+        } else if(arg == "-h" || arg == "--help") {
+            std::cout << "Usage: video_latency -c <config.json> [-s <stream>]\n";
+            return 0;
+        } else {
+            std::cerr << "Unknown argument or missing option value: " << arg << std::endl;
+            return 1;
         }
     }
 
@@ -386,6 +391,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    Gtk::Main kit(argc, argv);
     LatencyWindow win(config_path, selected_v);
     Gtk::Main::run(win);
     return 0;
