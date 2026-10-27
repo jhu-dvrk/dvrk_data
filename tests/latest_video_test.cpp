@@ -91,6 +91,19 @@ int main(int argc, char **argv) {
   for (int i = 0; i < 50; ++i) push(left, 50 + i, 1050 + i, 0);
   times = expect(sink, 99, 33);
   check(times.left_source_ts == 1099, "Backlog defeated latest-frame selection");
+  check(latest.update_positions("mixed", {{"left_cache", 8, 0}, {"right_cache", 0, 0}}),
+        "Cannot move live mixer inputs");
+  times = expect(sink, 33, 99);
+  check(times.left_source_ts == 1099 && times.right_source_ts == 2034,
+        "Moving cached inputs lost their timestamps");
+  check(!latest.update_positions("mixed", {{"left_cache", 0, 0}, {"right_cache", 10, 0}}),
+        "Mixer accepted an out-of-canvas rectangle");
+  check(!latest.update_positions("mixed", {{"missing", 0, 0}}), "Mixer accepted an unknown input");
+  check(!latest.update_positions("missing", {}), "Mixer accepted an unknown mixer");
+  check(!latest.update_positions("mixed", {{"left_cache", 0, 0}, {"left_cache", 8, 0}}),
+        "Mixer accepted duplicate input positions");
+  push(left, 100, 1100, 0);
+  expect(sink, 33, 100);
   gst_app_src_end_of_stream(GST_APP_SRC(left));
   gst_element_set_state(pipeline, GST_STATE_NULL);
   latest.stop();

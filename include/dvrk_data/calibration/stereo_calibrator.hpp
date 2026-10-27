@@ -38,11 +38,13 @@ struct CalibratorOptions {
     bool fix_intrinsics = true;       // Fix monocular intrinsics during stereo baseline optimization (fast & robust)
     bool fix_aspect_ratio = false;
     bool zero_tangent_dist = false;
-    double alpha_rectification = 0.0; // 0.0: maximize zoom / no black border, 1.0: keep all pixels
+    double alpha_rectification = 0.2; // 0.0: maximize zoom / no black border, 1.0: keep all pixels
 };
 
 struct StereoCalibrationResult {
     bool success = false;
+    // UTC ISO 8601 time of successful calibration; required for YAML export.
+    std::string calibration_date;
     cv::Size image_size{0, 0};
     DistortionModel model = DistortionModel::PLUMB_BOB;
 
@@ -92,6 +94,11 @@ public:
     int add_frame(const cv::Mat &left_img,
                   const cv::Mat &right_img,
                   const StereoDetection &detection);
+
+    /// Restore a frame with its archived ID; 0 assigns a new ID.
+    int add_frame(const cv::Mat &left_img,
+                  const cv::Mat &right_img,
+                  const StereoDetection &detection, int frame_id);
 
     /// Remove a frame by its unique ID
     bool remove_frame(int frame_id);

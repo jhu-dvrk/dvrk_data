@@ -29,6 +29,14 @@ public:
                                          std::string &archive_dir,
                                          std::string &error_msg);
 
+    /// Restore board.json and paired left/right sample_<ID>.png images,
+    /// re-detecting corners. Outputs remain unchanged if any pair is invalid.
+    static bool load_calibration_archive(const std::string &archive_dir,
+                                         CharucoConfig &board,
+                                         StereoCalibrator &calibrator,
+                                         std::string &error_msg,
+                                         StereoCalibrator::ProgressCallback progress_cb = nullptr);
+
     /// Load full stereo calibration from file (YAML or JSON)
     static bool load_stereo_calibration_file(const std::string &filepath,
                                             StereoCalibrationResult &result);

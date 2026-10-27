@@ -8,6 +8,8 @@
 #include "dvrk_data/calibration/board_config.hpp"
 #include <ctime>
 #include <set>
+#include <regex>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <filesystem>
@@ -37,11 +39,12 @@ bool write_ros_yaml(const std::string &filepath,
                     const cv::Mat &D,
                     const cv::Mat &R,
                     const cv::Mat &P,
-                    DistortionModel model) {
+                    DistortionModel model, const std::string &calibration_date) {
     std::ofstream ofs(filepath);
     if (!ofs.is_open()) return false;
 
     ofs << "# ROS 2 CameraInfo configuration\n";
+    ofs << "calibration_date: " << std::quoted(calibration_date) << "\n";
     ofs << "image_width: " << size.width << "\n";
     ofs << "image_height: " << size.height << "\n";
     ofs << "camera_name: " << camera_name << "\n";
@@ -69,6 +72,65 @@ bool write_ros_yaml(const std::string &filepath,
 }
 
 } // anonymous namespace
+
+bool CalibrationIO::load_calibration_archive(const std::string &archive_dir,
+                                             CharucoConfig &board,
+                                             StereoCalibrator &calibrator,
+                                             std::string &error_msg,
+                                             StereoCalibrator::ProgressCallback progress_cb) {
+    namespace fs = std::filesystem;
+    error_msg.clear();
+    try {
+        const fs::path root(archive_dir);
+        CharucoConfig loaded_board;
+        if (!load_board_config((root / "board.json").string(), loaded_board, error_msg)) return false;
+        const std::regex filename("sample_([0-9]+)\\.png");
+        auto images = [&](const fs::path &directory) {
+            std::map<int, fs::path> found;
+            for (const auto &entry : fs::directory_iterator(directory)) {
+                if (!entry.is_regular_file()) continue;
+                std::smatch match;
+                const auto name = entry.path().filename().string();
+                if (!std::regex_match(name, match, filename)) continue;
+                const auto id = std::stoll(match[1].str());
+                if (id <= 0 || id >= std::numeric_limits<int>::max() ||
+                    !found.emplace(static_cast<int>(id), entry.path()).second)
+                    throw std::runtime_error("Invalid or duplicate sample ID in " + entry.path().string());
+            }
+            return found;
+        };
+        const auto left = images(root / "left"), right = images(root / "right");
+        if (left.empty() || left.size() != right.size())
+            throw std::runtime_error("Archive must contain matching, nonempty left/right sample image sets.");
+        // Validate all pair identities before performing expensive detection.
+        for (const auto &[id, path] : left) {
+            (void)path;
+            if (!right.count(id)) throw std::runtime_error("Missing right image for sample " + std::to_string(id));
+        }
+        CharucoDetector detector(loaded_board);
+        StereoCalibrator restored;
+        for (const auto &[id, path] : left) {
+            if (progress_cb) progress_cb(static_cast<double>(restored.frame_count()) / left.size(),
+                "Loading sample #" + std::to_string(id));
+            auto l = cv::imread(path.string(), cv::IMREAD_COLOR);
+            auto r = cv::imread(right.at(id).string(), cv::IMREAD_COLOR);
+            if (l.empty() || r.empty() || l.size() != r.size() ||
+                (restored.frame_count() && l.size() != restored.expected_image_size()))
+                throw std::runtime_error("Missing, unreadable or mismatched images for sample " + std::to_string(id));
+            StereoDetection detection;
+            if (!detector.detect_stereo(l, r, detection) ||
+                restored.add_frame(l, r, detection, id) < 0)
+                throw std::runtime_error("Could not detect enough common ChArUco corners in sample " + std::to_string(id));
+        }
+        if (progress_cb) progress_cb(1.0, "Calibration images loaded");
+        board = loaded_board;
+        calibrator = std::move(restored);
+        return true;
+    } catch (const std::exception &error) {
+        error_msg = error.what();
+        return false;
+    }
+}
 
 bool CalibrationIO::save_calibration_archive(const std::string &output_dir,
                                               const std::vector<CalibrationFrame> &frames,
@@ -136,7 +198,7 @@ bool CalibrationIO::save_ros_camera_info_pair(const std::string &output_dir,
                                               const StereoCalibrationResult &result,
                                               const std::string &left_name,
                                               const std::string &right_name) {
-    if (!result.success) return false;
+    if (!result.success || result.calibration_date.empty()) return false;
 
     std::filesystem::create_directories(output_dir);
     std::string left_path = (std::filesystem::path(output_dir) / (left_name + ".yaml")).string();
@@ -154,16 +216,16 @@ bool CalibrationIO::save_ros_camera_info_pair(const std::string &output_dir,
     }
 
     bool ok_l = write_ros_yaml(left_path, left_name, result.image_size,
-                               result.K1, result.D1, result.R1, P1_ros, result.model);
+                               result.K1, result.D1, result.R1, P1_ros, result.model, result.calibration_date);
     bool ok_r = write_ros_yaml(right_path, right_name, result.image_size,
-                               result.K2, result.D2, result.R2, P2_ros, result.model);
+                               result.K2, result.D2, result.R2, P2_ros, result.model, result.calibration_date);
 
     return ok_l && ok_r;
 }
 
 bool CalibrationIO::save_stereo_calibration_file(const std::string &filepath,
                                                 const StereoCalibrationResult &result) {
-    if (!result.success) return false;
+    if (!result.success || result.calibration_date.empty()) return false;
 
     try {
         auto parent = std::filesystem::path(filepath).parent_path();
@@ -174,6 +236,7 @@ bool CalibrationIO::save_stereo_calibration_file(const std::string &filepath,
         if (!fs.isOpened()) return false;
 
         fs << "type" << "dvrk_calibration:stereo@1.0.0";
+        fs << "calibration_date" << result.calibration_date;
         fs << "distortion_model" << (result.model == DistortionModel::RATIONAL_POLYNOMIAL ? "rational_polynomial" : "plumb_bob");
         fs << "image_width" << result.image_size.width;
         fs << "image_height" << result.image_size.height;
@@ -215,6 +278,12 @@ bool CalibrationIO::load_stereo_calibration_file(const std::string &filepath,
         fs["image_width"] >> w;
         fs["image_height"] >> h;
         result.image_size = cv::Size(w, h);
+        if (!fs["calibration_date"].isString()) {
+            std::cerr << "Error loading calibration file: calibration_date is required." << std::endl;
+            return false;
+        }
+        fs["calibration_date"] >> result.calibration_date;
+        if (result.calibration_date.empty()) return false;
 
         std::string model_str;
         fs["distortion_model"] >> model_str;

@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 
 namespace dvrk_data::calibration {
@@ -230,7 +231,7 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
       m_calibrate_button("Run Stereo Calibration"),
       m_filter_outliers_button("Filter Outliers & Recalibrate"),
       m_display_box(Gtk::ORIENTATION_VERTICAL, 6),
-      m_save_button("Save Calibration...") {
+      m_save_button("Save Calibration & Images...") {
 
     set_title("dVRK Stereo Endoscope Calibrator");
     set_default_size(1360, 800);
@@ -313,6 +314,7 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
 
     // --- Sidebar Frame 1: Stream Source ---
     m_source_frame.set_label(" Video Stream Source ");
+    m_source_frame.set_expanded(false);
     m_source_frame.add(m_source_box);
     m_source_box.set_border_width(6);
     m_source_info_label.set_alignment(0.0, 0.5);
@@ -323,20 +325,14 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
 
     // --- Sidebar Frame 2: Target Board (Loaded from JSON) ---
     m_board_frame.set_label(" ChArUco Board Target ");
+    m_board_frame.set_expanded(false);
     m_board_frame.add(m_board_box);
     m_board_box.set_border_width(6);
 
-    std::string filename_only = std::filesystem::path(m_board_config_file).filename().string();
-    m_board_file_label.set_markup("Config: <b>" + filename_only + "</b>");
+    update_board_ui();
     m_board_file_label.set_alignment(0.0, 0.5);
     m_board_box.pack_start(m_board_file_label, Gtk::PACK_SHRINK);
 
-    std::ostringstream board_info_ss;
-    board_info_ss << "Grid: " << m_charuco_config.squares_x << " x " << m_charuco_config.squares_y << "\n"
-                  << "Square: " << std::fixed << std::setprecision(1) << m_charuco_config.square_length_mm << " mm  |  "
-                  << "Marker: " << m_charuco_config.marker_length_mm << " mm\n"
-                  << "Dictionary: " << dictionary_to_string(m_charuco_config.dictionary_id);
-    m_board_info_label.set_text(board_info_ss.str());
     m_board_info_label.set_alignment(0.0, 0.5);
     m_board_box.pack_start(m_board_info_label, Gtk::PACK_SHRINK);
 
@@ -370,9 +366,13 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_frames_tree_view.append_column("ID", m_frame_cols.col_id);
     m_frames_tree_view.append_column("Corners", m_frame_cols.col_corners);
     m_frames_tree_view.append_column("Error (px)", m_frame_cols.col_error);
+    m_frames_tree_view.get_column(0)->set_sort_column(m_frame_cols.col_id);
+    m_frames_tree_view.get_column(1)->set_sort_column(m_frame_cols.col_corners);
+    m_frames_tree_view.get_column(2)->set_sort_column(m_frame_cols.col_error_value);
+    m_frames_list_store->set_sort_column(m_frame_cols.col_id, Gtk::SORT_ASCENDING);
     m_frames_tree_view.get_selection()->signal_changed().connect([this] {
-        if (m_calib_result.success && !m_is_calibrating.load() &&
-            m_frames_tree_view.get_selection()->get_selected()) {
+        if (m_is_calibrating.load()) return;
+        if (m_frames_tree_view.get_selection()->get_selected()) {
             if (m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
             else m_display_mode_combo.set_active_id("validation");
         } else if (m_display_mode == DisplayMode::GRID_VALIDATION) {
@@ -382,7 +382,7 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
 
     // A click on an already selected row should also reopen validation.
     m_frames_tree_view.signal_button_release_event().connect([this](GdkEventButton *event) {
-        if (event->button != 1 || m_is_calibrating.load() || !m_calib_result.success)
+        if (event->button != 1 || m_is_calibrating.load())
             return false;
         Gtk::TreeModel::Path path;
         if (m_frames_tree_view.get_path_at_pos(static_cast<int>(event->x),
@@ -403,6 +403,9 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_frame_buttons_box.pack_start(m_delete_frame_button, Gtk::PACK_EXPAND_WIDGET);
     m_frame_buttons_box.pack_start(m_clear_frames_button, Gtk::PACK_EXPAND_WIDGET);
     m_capture_box.pack_start(m_frame_buttons_box, Gtk::PACK_SHRINK);
+    m_load_samples_button.set_tooltip_text("Reload board.json and paired left/right images from a saved calibration archive");
+    m_load_samples_button.signal_clicked().connect(sigc::mem_fun(*this, &CalibrationWindow::on_load_samples_clicked));
+    m_capture_box.pack_start(m_load_samples_button, Gtk::PACK_SHRINK);
 
     m_sidebar_box.pack_start(m_capture_frame, Gtk::PACK_SHRINK);
 
@@ -422,6 +425,22 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     });
     model_box->pack_start(m_dist_model_combo, Gtk::PACK_EXPAND_WIDGET);
     m_calib_box.pack_start(*model_box, Gtk::PACK_SHRINK);
+
+    auto *alpha_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 4));
+    alpha_box->pack_start(*Gtk::manage(new Gtk::Label("Rectification alpha:")), Gtk::PACK_SHRINK);
+    m_rectification_alpha.set_range(0.0, 1.0);
+    m_rectification_alpha.set_increments(0.05, 0.1);
+    m_rectification_alpha.set_digits(2);
+    m_rectification_alpha.set_numeric(true);
+    m_rectification_alpha.set_value(m_calib_options.alpha_rectification);
+    m_rectification_alpha.set_tooltip_text(
+        "Set before Calibrate: 0 crops to remove black borders; higher values retain more of the image; "
+        "1 retains all source pixels and may show black borders. Saved rectification uses this setting.");
+    m_rectification_alpha.signal_value_changed().connect([this] {
+        m_calib_options.alpha_rectification = m_rectification_alpha.get_value();
+    });
+    alpha_box->pack_start(m_rectification_alpha, Gtk::PACK_EXPAND_WIDGET);
+    m_calib_box.pack_start(*alpha_box, Gtk::PACK_SHRINK);
 
     m_calibrate_button.signal_clicked().connect(sigc::mem_fun(*this, &CalibrationWindow::on_calibrate_clicked));
     m_calib_box.pack_start(m_calibrate_button, Gtk::PACK_SHRINK);
@@ -457,7 +476,7 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_display_mode_combo.append("rectified", "Rectified Stereo (Epipolar)");
     m_display_mode_combo.append("anaglyph", "Red-Cyan 3D Anaglyph");
     m_display_mode_combo.append("validation", "Selected Sample: Grid Reprojection");
-    m_display_mode_combo.set_active_id("tracking");
+    m_display_mode_combo.set_active_id("heatmap");
     m_display_mode_combo.signal_changed().connect(sigc::mem_fun(*this, &CalibrationWindow::on_display_mode_changed));
     view_box->pack_start(m_display_mode_combo, Gtk::PACK_EXPAND_WIDGET);
     m_display_box.pack_start(*view_box, Gtk::PACK_SHRINK);
@@ -468,6 +487,14 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_display_box.pack_start(m_validation_label, Gtk::PACK_SHRINK);
 
     m_save_button.set_sensitive(false);
+    m_save_images_check.set_active(true);
+    m_save_images_check.set_tooltip_text(
+        "Save raw left/right PNG pairs and board.json in a dated archive alongside calibration YAML files");
+    m_save_images_check.signal_toggled().connect([this] {
+        m_save_button.set_label(m_save_images_check.get_active()
+            ? "Save Calibration & Images..." : "Save Calibration...");
+    });
+    m_display_box.pack_start(m_save_images_check, Gtk::PACK_SHRINK);
     m_save_button.signal_clicked().connect(sigc::mem_fun(*this, &CalibrationWindow::on_save_clicked));
     m_display_box.pack_start(m_save_button, Gtk::PACK_SHRINK);
 
@@ -483,6 +510,18 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
 
     update_coverage_ui();
     show_all_children();
+}
+
+void CalibrationWindow::update_board_ui() {
+    std::string filename_only = std::filesystem::path(m_board_config_file).filename().string();
+    m_board_file_label.set_markup("Config: <b>" + Glib::Markup::escape_text(filename_only) + "</b>");
+
+    std::ostringstream board_info_ss;
+    board_info_ss << "Grid: " << m_charuco_config.squares_x << " x " << m_charuco_config.squares_y << "\n"
+                  << "Square: " << std::fixed << std::setprecision(1) << m_charuco_config.square_length_mm << " mm  |  "
+                  << "Marker: " << m_charuco_config.marker_length_mm << " mm\n"
+                  << "Dictionary: " << dictionary_to_string(m_charuco_config.dictionary_id);
+    m_board_info_label.set_text(board_info_ss.str());
 }
 
 CalibrationWindow::~CalibrationWindow() {
@@ -680,6 +719,7 @@ bool CalibrationWindow::capture_frame(const cv::Mat &l, const cv::Mat &r,
         row[m_frame_cols.col_id] = frame_id;
         row[m_frame_cols.col_corners] = static_cast<int>(det.common_ids.size());
         row[m_frame_cols.col_error] = "--";
+        row[m_frame_cols.col_error_value] = std::numeric_limits<double>::infinity();
 
         // Frame collection changed: disable outlier filtering until recalibrated
         m_filter_outliers_button.set_sensitive(false);
@@ -737,10 +777,105 @@ void CalibrationWindow::on_clear_frames_clicked() {
     if (m_display_mode_combo.get_active_id() == "rectified" ||
         m_display_mode_combo.get_active_id() == "anaglyph" ||
         m_display_mode_combo.get_active_id() == "validation") {
-        m_display_mode_combo.set_active_id("tracking");
+        m_display_mode_combo.set_active_id("heatmap");
     }
     update_coverage_ui();
     update_calib_status_ui();
+}
+
+void CalibrationWindow::on_load_samples_clicked() {
+    if (m_is_calibrating.load()) return;
+    Gtk::FileChooserDialog dialog(*this, "Load Calibration Image Archive", Gtk::FILE_CHOOSER_ACTION_SELECT_FOLDER);
+    dialog.add_button("Cancel", Gtk::RESPONSE_CANCEL);
+    dialog.add_button("Load Images", Gtk::RESPONSE_OK);
+    if (dialog.run() != Gtk::RESPONSE_OK) return;
+    m_archive_path = dialog.get_filename();
+    dialog.hide();
+    if (m_calib_thread.joinable()) m_calib_thread.join();
+    m_is_calibrating = true;
+    m_loading_archive = true;
+    m_capture_box.set_sensitive(false);
+    m_calib_box.set_sensitive(false);
+    m_display_box.set_sensitive(false);
+    m_calib_progress_bar.set_fraction(0.0);
+    m_calib_progress_bar.set_text("Loading calibration images...");
+    // Drain the receiver callback before replacing the detector/board on success.
+    m_receiver->stop();
+    m_calib_thread = std::thread([this, path = m_archive_path] {
+        auto calibrator = std::make_unique<StereoCalibrator>();
+        CharucoConfig board;
+        std::string error;
+        auto progress = [this](double fraction, const std::string &stage) {
+            {
+                std::lock_guard<std::mutex> lock(m_calib_state_mutex);
+                m_calib_progress_frac = fraction;
+                m_calib_progress_stage = stage;
+            }
+            m_calib_progress_dispatcher.emit();
+        };
+        const bool ok = CalibrationIO::load_calibration_archive(path, board, *calibrator, error, progress);
+        {
+            std::lock_guard<std::mutex> lock(m_calib_state_mutex);
+            m_calib_done_ok = ok;
+            m_calib_done_error = error;
+            m_loaded_board = board;
+            m_loaded_calibrator = std::move(calibrator);
+        }
+        m_calib_finished_dispatcher.emit();
+    });
+}
+
+void CalibrationWindow::on_archive_loaded() {
+    // The worker has been joined by on_calib_finished_dispatched(). Live frame
+    // callbacks remain stopped until the new board and collection are committed.
+    const bool ok = m_calib_done_ok;
+    if (ok) {
+        on_clear_frames_clicked();
+        m_charuco_config = m_loaded_board;
+        m_board_config_file = (std::filesystem::path(m_archive_path) / "board.json").string();
+        m_detector->update_config(m_charuco_config);
+        update_board_ui();
+        m_calibrator = std::move(m_loaded_calibrator);
+        for (const auto &frame : m_calibrator->get_frames()) {
+            auto row = *(m_frames_list_store->append());
+            row[m_frame_cols.col_id] = frame.id;
+            row[m_frame_cols.col_corners] = static_cast<int>(frame.charuco_ids.size());
+            row[m_frame_cols.col_error] = "--";
+            row[m_frame_cols.col_error_value] = std::numeric_limits<double>::infinity();
+            m_coverage_tracker->add_frame(frame.left_corners, frame.charuco_ids, frame.object_points,
+                                         frame.left_image.size(), frame.rvec, frame.pose_valid);
+        }
+        m_auto_capture_check.set_active(false);
+        {
+            std::lock_guard<std::mutex> lock(m_frame_mutex);
+            m_has_new_frame = false;
+            m_frame_is_stale = true;
+            m_current_detection = StereoDetection();
+        }
+        const auto count = std::to_string(m_calibrator->frame_count());
+        m_frames_count_label.set_text("Captured Frames: " + count);
+        m_big_samples_label.set_markup("<span font_weight='bold' font_size='xx-large'>Samples: " + count + "</span>");
+        update_coverage_ui();
+    }
+    m_loaded_calibrator.reset();
+    m_loading_archive = false;
+    m_is_calibrating = false;
+    m_capture_box.set_sensitive(true);
+    m_calib_box.set_sensitive(true);
+    m_display_box.set_sensitive(true);
+    update_calib_status_ui();
+    if (ok) {
+        m_calib_progress_bar.set_fraction(1.0);
+        m_calib_progress_bar.set_text("Images loaded. Ready to recalibrate.");
+        m_display_mode_combo.set_active_id("validation");
+        show_selected_grid();
+    } else {
+        m_calib_progress_bar.set_text("Loading images failed");
+        Gtk::MessageDialog error(*this, "Could not load calibration images", false, Gtk::MESSAGE_ERROR, Gtk::BUTTONS_OK);
+        error.set_secondary_text(m_calib_done_error);
+        error.run();
+    }
+    m_receiver->start(m_receiver_config);
 }
 
 void CalibrationWindow::on_calibrate_clicked() {
@@ -766,6 +901,8 @@ void CalibrationWindow::on_calibrate_clicked() {
     m_calibrate_button.set_sensitive(false);
     m_filter_outliers_button.set_sensitive(false);
     m_dist_model_combo.set_sensitive(false);
+    m_rectification_alpha.set_sensitive(false);
+    m_load_samples_button.set_sensitive(false);
     m_capture_button.set_sensitive(false);
     m_delete_frame_button.set_sensitive(false);
     m_clear_frames_button.set_sensitive(false);
@@ -822,6 +959,10 @@ void CalibrationWindow::on_calib_finished_dispatched() {
     if (m_calib_thread.joinable()) {
         m_calib_thread.join();
     }
+    if (m_loading_archive) {
+        on_archive_loaded();
+        return;
+    }
     m_is_calibrating = false;
     m_display_mode_combo.set_sensitive(true);
 
@@ -838,6 +979,8 @@ void CalibrationWindow::on_calib_finished_dispatched() {
     if (!ok) m_pending_calibration_frames.clear();
     m_calibrate_button.set_sensitive(true);
     m_dist_model_combo.set_sensitive(true);
+    m_rectification_alpha.set_sensitive(true);
+    m_load_samples_button.set_sensitive(true);
     m_capture_button.set_sensitive(true);
     m_delete_frame_button.set_sensitive(true);
     m_clear_frames_button.set_sensitive(true);
@@ -860,6 +1003,10 @@ void CalibrationWindow::on_calib_finished_dispatched() {
         m_epipolar_err_label.set_markup("Vertical Disparity Error: <b>" + ss_epi.str() + "</b>");
 
         // Update TreeView per-frame errors by unique frame ID
+        int sort_column;
+        Gtk::SortType sort_order;
+        m_frames_list_store->get_sort_column_id(sort_column, sort_order);
+        m_frames_list_store->set_sort_column(Gtk::TreeSortable::DEFAULT_UNSORTED_COLUMN_ID, Gtk::SORT_ASCENDING);
         auto children = m_frames_list_store->children();
         for (auto it = children.begin(); it != children.end(); ++it) {
             int id = (*it)[m_frame_cols.col_id];
@@ -868,9 +1015,11 @@ void CalibrationWindow::on_calib_finished_dispatched() {
                 std::ostringstream ss;
                 ss << std::fixed << std::setprecision(2) << err_it->second;
                 (*it)[m_frame_cols.col_error] = ss.str();
+                (*it)[m_frame_cols.col_error_value] = err_it->second;
             }
         }
 
+        m_frames_list_store->set_sort_column(sort_column, sort_order);
         m_save_button.set_sensitive(true);
         m_display_mode_combo.set_active_id("rectified");
     } else {
@@ -997,10 +1146,6 @@ void CalibrationWindow::on_save_clicked() {
                                   Gtk::FILE_CHOOSER_ACTION_SELECT_FOLDER);
     dialog.add_button("Cancel", Gtk::RESPONSE_CANCEL);
     dialog.add_button("Save", Gtk::RESPONSE_OK);
-    Gtk::CheckButton save_raw_check("Also save raw calibration images in a dated directory");
-    save_raw_check.set_active(false);
-    save_raw_check.show();
-    dialog.set_extra_widget(save_raw_check);
 
     if (dialog.run() == Gtk::RESPONSE_OK) {
         std::string folder = dialog.get_filename();
@@ -1014,7 +1159,7 @@ void CalibrationWindow::on_save_clicked() {
 
         std::string archive_dir, archive_error;
         bool archive_ok = true;
-        if (ros_ok && dvrk_ok && save_raw_check.get_active()) {
+        if (ros_ok && dvrk_ok && m_save_images_check.get_active()) {
             archive_ok = CalibrationIO::save_calibration_archive(
                 folder, m_calibrated_frames, m_charuco_config, archive_dir, archive_error);
         }
@@ -1061,10 +1206,12 @@ void CalibrationWindow::on_display_mode_changed() {
 void CalibrationWindow::show_selected_grid() {
     if (m_is_calibrating.load()) return;
     auto selected = m_frames_tree_view.get_selection()->get_selected();
-    if (!m_calib_result.success || !selected) {
-        m_validation_label.set_text(m_calib_result.success
-            ? "Select a sample in the captured frames list."
-            : "Run stereo calibration, then click a sample to validate its grid.");
+    if (!selected && !m_frames_list_store->children().empty()) {
+        m_frames_tree_view.get_selection()->select(m_frames_list_store->children().begin());
+        return; // Selection change renders the chosen sample.
+    }
+    if (!selected) {
+        m_validation_label.set_text("Capture or load calibration images to display a sample.");
         cv::Mat blank(360, 1280, CV_8UC3, cv::Scalar(16, 16, 16));
         m_video_area.set_image(blank);
         return;
@@ -1077,7 +1224,11 @@ void CalibrationWindow::show_selected_grid() {
     GridReprojection projection;
     std::string error;
     cv::Mat display;
-    if (StereoCalibrator::reproject_grid(*it, m_charuco_config, m_calib_result, projection, error)) {
+    if (!m_calib_result.success) {
+        cv::hconcat(it->left_image, it->right_image, display);
+        m_validation_label.set_text("Sample #" + std::to_string(id) +
+            " | Raw images. Run stereo calibration to display grid reprojection.");
+    } else if (StereoCalibrator::reproject_grid(*it, m_charuco_config, m_calib_result, projection, error)) {
         cv::hconcat(projection.left_overlay, projection.right_overlay, display);
         std::ostringstream ss;
         ss << "Sample #" << id << " | RMS L: " << std::fixed << std::setprecision(3)

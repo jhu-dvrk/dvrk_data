@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <regex>
 #include <sstream>
 #include <cassert>
 #include <filesystem>
@@ -111,6 +112,10 @@ int main() {
         std::cerr << "Calibration failed: " << err << std::endl;
         return 1;
     }
+    if (!std::regex_match(result.calibration_date, std::regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"))) {
+        std::cerr << "Successful calibration must record a UTC date" << std::endl;
+        return 1;
+    }
 
     std::cout << "Calibration computed successfully!\n"
               << "  RMS Error: " << result.rms_error << " px\n"
@@ -125,6 +130,20 @@ int main() {
     }
     if (result.avg_epipolar_error_px >= 0.5) {
         std::cerr << "Epipolar error too large: " << result.avg_epipolar_error_px << std::endl;
+        return 1;
+    }
+
+    // Alpha changes rectification field of view without changing the camera fit.
+    auto uncropped_options = opts;
+    uncropped_options.alpha_rectification = 1.0;
+    dvrk_data::calibration::StereoCalibrationResult uncropped;
+    if (!calibrator.calibrate(uncropped_options, uncropped, err) ||
+        uncropped.P1.at<double>(0, 0) >= result.P1.at<double>(0, 0) ||
+        cv::norm(uncropped.K1, result.K1) > 1e-6 ||
+        cv::norm(uncropped.T, result.T) > 1e-6 ||
+        uncropped.map1_l.size() != img_size ||
+        cv::norm(uncropped.map1_l, result.map1_l, cv::NORM_INF) < 1.0) {
+        std::cerr << "Rectification alpha did not retain more field of view: " << err << std::endl;
         return 1;
     }
 
@@ -237,6 +256,14 @@ int main() {
         std::ifstream file(path, std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     };
+    for (const char *file : {"left.yaml", "right.yaml", "stereo_calibration.yaml"}) {
+        const auto contents = read_file(std::filesystem::path(tmp_dir) / file);
+        if (contents.find("calibration_date:") == std::string::npos ||
+            contents.find(result.calibration_date) == std::string::npos) {
+            std::cerr << "Calibration YAML is missing the original calibration date: " << file << std::endl;
+            return 1;
+        }
+    }
     for (const char *file : {"left.yaml", "right.yaml", "stereo_calibration.yaml"}) {
         if (read_file(std::filesystem::path(tmp_dir) / file).empty() ||
             read_file(std::filesystem::path(tmp_dir) / file) !=
@@ -351,6 +378,29 @@ int main() {
         std::cerr << "Failed to load stereo_calibration.yaml" << std::endl;
         return 1;
     }
+    if (loaded_result.calibration_date != result.calibration_date) {
+        std::cerr << "Calibration date changed during save/load" << std::endl;
+        return 1;
+    }
+    {
+        auto undated = read_file(std::filesystem::path(tmp_dir) / "stereo_calibration.yaml");
+        const auto start = undated.find("calibration_date:");
+        undated.erase(start, undated.find('\n', start) - start + 1);
+        const auto path = std::filesystem::path(tmp_dir) / "missing_date.yaml";
+        std::ofstream(path) << undated;
+        StereoCalibrationResult missing_date;
+        if (CalibrationIO::load_stereo_calibration_file(path.string(), missing_date)) {
+            std::cerr << "Calibration YAML without calibration_date must be rejected" << std::endl;
+            return 1;
+        }
+        auto missing_date_result = result;
+        missing_date_result.calibration_date.clear();
+        if (CalibrationIO::save_ros_camera_info_pair(tmp_dir + "/missing_date", missing_date_result) ||
+            CalibrationIO::save_stereo_calibration_file((std::filesystem::path(tmp_dir) / "missing_date_export.yaml").string(), missing_date_result)) {
+            std::cerr << "Calibration without a date must not be exported" << std::endl;
+            return 1;
+        }
+    }
 
     if (std::abs(loaded_result.baseline_mm - result.baseline_mm) >= 1e-4) {
         std::cerr << "Loaded baseline does not match saved baseline" << std::endl;
@@ -376,6 +426,7 @@ int main() {
     std::string incomplete_yaml = tmp_dir + "/incomplete_calib.yaml";
     {
         cv::FileStorage fs_inc(incomplete_yaml, cv::FileStorage::WRITE);
+        fs_inc << "calibration_date" << loaded_result.calibration_date;
         fs_inc << "image_width" << loaded_result.image_size.width;
         fs_inc << "image_height" << loaded_result.image_size.height;
         fs_inc << "K1" << loaded_result.K1;

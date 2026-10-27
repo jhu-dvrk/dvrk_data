@@ -71,6 +71,9 @@ private:
     void on_capture_clicked();
     void on_delete_frame_clicked();
     void on_clear_frames_clicked();
+    void on_load_samples_clicked();
+    void on_archive_loaded();
+    void update_board_ui();
     void on_calibrate_clicked();
     void on_filter_outliers_clicked();
     void on_calib_progress_dispatched();
@@ -105,7 +108,7 @@ private:
     // Retain the exact inputs of the last successful calibration for export.
     std::vector<CalibrationFrame> m_pending_calibration_frames;
     std::vector<CalibrationFrame> m_calibrated_frames;
-    DisplayMode m_display_mode = DisplayMode::LIVE_TRACKING;
+    DisplayMode m_display_mode = DisplayMode::COVERAGE_HEATMAP;
 
     // Frame synchronization & dispatch
     Glib::Dispatcher m_dispatcher;
@@ -151,13 +154,13 @@ private:
     Gtk::Box m_sidebar_box;
 
     // Source Frame
-    Gtk::Frame m_source_frame;
+    Gtk::Expander m_source_frame;
     Gtk::Box m_source_box;
     Gtk::Label m_source_info_label;
     Gtk::Label m_fps_label;
 
     // Board Settings Frame (Loaded from JSON)
-    Gtk::Frame m_board_frame;
+    Gtk::Expander m_board_frame;
     Gtk::Box m_board_box;
     Gtk::Label m_board_file_label;
     Gtk::Label m_board_info_label;
@@ -178,19 +181,23 @@ private:
             add(col_id);
             add(col_corners);
             add(col_error);
+            add(col_error_value);
         }
         Gtk::TreeModelColumn<int> col_id;
         Gtk::TreeModelColumn<int> col_corners;
         Gtk::TreeModelColumn<Glib::ustring> col_error;
+        Gtk::TreeModelColumn<double> col_error_value;
     } m_frame_cols;
     Gtk::Box m_frame_buttons_box;
     Gtk::Button m_delete_frame_button;
     Gtk::Button m_clear_frames_button;
+    Gtk::Button m_load_samples_button{"Load Calibration Images..."};
 
     // Calibration & Output Frame
     Gtk::Frame m_calib_frame;
     Gtk::Box m_calib_box;
     Gtk::ComboBoxText m_dist_model_combo;
+    Gtk::SpinButton m_rectification_alpha;
     Gtk::Button m_calibrate_button;
     Gtk::Button m_filter_outliers_button;
     Gtk::ProgressBar m_calib_progress_bar;
@@ -202,6 +209,7 @@ private:
     Gtk::Frame m_display_frame;
     Gtk::Box m_display_box;
     Gtk::ComboBoxText m_display_mode_combo;
+    Gtk::CheckButton m_save_images_check{"Include raw calibration images"};
     Gtk::Button m_save_button;
     Gtk::Label m_validation_label;
 
@@ -216,6 +224,10 @@ private:
     bool m_calib_done_ok = false;
     StereoCalibrationResult m_calib_done_result;
     std::string m_calib_done_error;
+    bool m_loading_archive = false;
+    std::string m_archive_path;
+    CharucoConfig m_loaded_board;
+    std::unique_ptr<StereoCalibrator> m_loaded_calibrator;
 };
 
 } // namespace dvrk_data::calibration

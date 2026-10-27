@@ -53,12 +53,23 @@ The calibrator monitors `/proc/net/unix` and GStreamer bus events continuously:
 - **Auto-Reconnect**: If `stereo_source` restarts or temporarily drops, the calibrator cleanly recycles the pipeline and reconnects without having to restart the application.
 
 ### 3. Interactive Guidance & Top Dashboard
+
+**Video Stream Source** and **ChArUco Board Target** start collapsed to leave more
+room for capture and calibration controls. Click either heading to show its details.
+
 - **Prominent Top Banner**: Displays high-contrast status text (`STABLE — READY`, `HOLD STILL`, `✓ CAPTURED SAMPLE #N!`, `MOVE TARGET`), sample count (`Samples: N`), and tall coverage progress bars directly above the video preview for easy readability from across the room.
 - **Auto-Capture**: Captures a stationary board view only when it differs from every retained sample. Corner IDs keep changes in partial-board detection from counting as motion, and estimated pose jitter does not trigger captures. Moving either the target or the endoscope can provide a new view; keeping both still should produce one sample. Manual captures use the same duplicate check.
-- **Coverage Heatmap**: Visualizes spatial corner density across the image sensor to ensure adequate calibration at the optical peripheries.
+- **Coverage Heatmap**: The startup view visualizes spatial corner density across the image sensor to ensure adequate calibration at the optical peripheries.
 - **Rectified Epipolar Lines**: Real-time rectification view with clickable horizontal alignment guidelines.
 - **3D Anaglyph Mode**: Stereo disparity visualization with standard Red-Cyan glasses.
 - **One-Click Outlier Filtering**: Automatically identifies frames whose reprojection error exceeds 1.5x the median error, purges them from the collection, rebuilds coverage, and recalibrates in one click.
+
+In **Stereo Calibration**, set **Rectification alpha** before clicking **Calibrate**
+to control OpenCV's rectification crop. The default is `0.20`. `0.00` removes black
+borders; increase alpha to retain more field of view. `1.00` retains
+all source pixels and can introduce black borders. The chosen value affects the
+rectified preview and the projection matrices/maps saved by that calibration.
+Changing it after calibration requires clicking **Calibrate** again to apply it.
 
 ### 4. Validate a Captured Pair
 
@@ -80,6 +91,25 @@ samples were used to fit the calibration, so their residuals measure fit, rather
 than independent accuracy on unseen images. Changing the frame collection requires
 recalibration to update the calibration fit.
 
+The **ID**, **Corners**, and **Error (px)** headers toggle ascending/descending
+numeric sorting. Entering sample reprojection automatically selects the first
+sample in the current sort order when nothing is selected. Before calibration,
+this view shows the raw image pair with a reminder to calibrate.
+
+### 5. Reload Images from a Past Calibration
+
+Click **Load Calibration Images...** and select a saved
+`stereo_calibration_<date/time>` archive containing `board.json`, `left/`, and
+`right/`. The tool loads matching `sample_<ID>.png` pairs in the background,
+restores their IDs and board settings, and re-detects ChArUco corners. A successful
+load replaces the current collection and resets its calibration; a failed load
+leaves the collection intact. Missing pairs, inconsistent sizes, unreadable
+images, or insufficient common corners are reported as errors.
+
+The first imported sample is displayed automatically. Auto-capture is turned off
+to keep the imported collection stable. Set the desired alpha and click **Run
+Stereo Calibration** to compute new results; the old archive is not modified.
+
 ---
 
 ## Standalone Rectification Verification
@@ -94,12 +124,14 @@ ros2 run dvrk_data verify_stereo_calibration -c /path/to/stereo_calibration.yaml
 
 ## Output Files
 
-When you click **Save Calibration...**, the tool writes:
+After a successful calibration, click **Save Calibration & Images...** in
+**View Mode & Export** and choose an output folder. The tool writes:
+
 - `left.yaml` and `right.yaml`: Standard ROS 2 CameraInfo configuration (`camera_matrix`, `distortion_coefficients`, `rectification_matrix`, `projection_matrix`).
 - `stereo_calibration.yaml`: Consolidated dVRK configuration with extrinsics ($R, T, E, F$), disparity-to-depth matrix ($Q$), baseline in millimeters, and RMS error metrics.
 
-The save dialog includes **Also save raw calibration images in a dated directory**
-(unchecked by default). Enabling it also creates
+The sidebar's **Include raw calibration images** checkbox is enabled by default.
+Leave it checked to also create
 `stereo_calibration_YYYY-MM-DD_HH-MM-SS/` inside the selected output folder, using
 local time. Repeated saves get a numeric suffix when needed. The directory contains:
 
@@ -111,3 +143,9 @@ local time. Repeated saves get a numeric suffix when needed. The directory conta
 
 The archive uses the exact sample set from the last successful calibration, even
 if you subsequently add or delete samples. Recalibrate to archive a changed set.
+Uncheck **Include raw calibration images** to export only the YAML files.
+
+All three YAML files include the same `calibration_date` timestamp in UTC ISO 8601
+format (for example, `2026-10-26T18:30:00Z`). This records when calibration
+succeeded and remains unchanged when saving again or loading and re-exporting.
+`calibration_date` is required when loading or exporting calibration YAML.

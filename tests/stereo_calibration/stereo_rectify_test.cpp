@@ -35,6 +35,7 @@ struct TemporaryDirectory {
 cal::StereoCalibrationResult calibration() {
     cal::StereoCalibrationResult r;
     r.success = true; r.image_size = {10, 8};
+    r.calibration_date = "2026-10-26T18:30:00Z";
     r.K1 = (cv::Mat_<double>(3,3) << 12,0,5,0,12,4,0,0,1);
     r.K2 = r.K1.clone();
     r.D1 = cv::Mat::zeros(1,5,CV_64F); r.D2 = r.D1.clone();

@@ -6,6 +6,10 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 #include <cmath>
+#include <algorithm>
+#include <limits>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 
@@ -135,6 +139,16 @@ bool StereoCalibrator::reproject_grid(const CalibrationFrame &frame,
 int StereoCalibrator::add_frame(const cv::Mat &left_img,
                                const cv::Mat &right_img,
                                const StereoDetection &detection) {
+    return add_frame(left_img, right_img, detection, 0);
+}
+
+int StereoCalibrator::add_frame(const cv::Mat &left_img,
+                               const cv::Mat &right_img,
+                               const StereoDetection &detection, int frame_id) {
+    if (frame_id < 0 || frame_id == std::numeric_limits<int>::max() ||
+        m_next_frame_id == std::numeric_limits<int>::max() ||
+        (frame_id && std::any_of(m_frames.begin(), m_frames.end(),
+            [frame_id](const auto &frame) { return frame.id == frame_id; }))) return -1;
     if (!detection.is_stereo_valid || detection.common_ids.size() < 6 || detection.object_points.size() < 6) {
         return -1;
     }
@@ -152,7 +166,8 @@ int StereoCalibrator::add_frame(const cv::Mat &left_img,
     }
 
     CalibrationFrame frame;
-    frame.id = m_next_frame_id++;
+    frame.id = frame_id ? frame_id : m_next_frame_id;
+    m_next_frame_id = std::max(m_next_frame_id, frame.id + 1);
     frame.left_image = left_img.clone();
     frame.right_image = right_img.clone();
     frame.charuco_ids = detection.common_ids;
@@ -401,6 +416,13 @@ bool StereoCalibrator::calibrate(const CalibratorOptions &opts,
 
     result.avg_epipolar_error_px = (point_count > 0) ? (total_epipolar_err / point_count) : 0.0;
     result.max_epipolar_error_px = max_epipolar_err;
+    const auto completed_at = std::time(nullptr);
+    std::tm utc{};
+    if (gmtime_r(&completed_at, &utc)) {
+        std::ostringstream date;
+        date << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+        result.calibration_date = date.str();
+    }
     result.success = true;
 
     if (progress_cb) {

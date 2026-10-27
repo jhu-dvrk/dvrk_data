@@ -47,7 +47,31 @@ public:
   }
   ~Mixer() { stop(); }
 
+  const std::string &name() const { return m_spec.name; }
+
+  bool update_positions(const std::vector<LatestVideoPosition> &positions) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto candidate = m_positions;
+    std::vector<bool> seen(m_inputs.size(), false);
+    for (const auto &position : positions) {
+      const auto it = std::find_if(m_spec.inputs.begin(), m_spec.inputs.end(),
+          [&](const auto &input) { return input.name == position.input; });
+      if (it == m_spec.inputs.end()) return false;
+      const auto index = static_cast<size_t>(it - m_spec.inputs.begin());
+      if (seen[index] || position.x < 0 || position.y < 0 ||
+          position.x + static_cast<int64_t>(it->width) > m_spec.width ||
+          position.y + static_cast<int64_t>(it->height) > m_spec.height) return false;
+      seen[index] = true;
+      candidate[index] = {position.x, position.y};
+    }
+    m_positions = std::move(candidate);
+    ++m_revision;
+    m_changed.notify_one();
+    return true;
+  }
+
   bool start(GstElement *pipeline, std::string &error) {
+    for (const auto &input : m_spec.inputs) m_positions.emplace_back(input.x, input.y);
     m_output = gst_bin_get_by_name(GST_BIN(pipeline), m_spec.name.c_str());
     if (!m_output || !GST_IS_APP_SRC(m_output)) {
       error = "Missing latest-video appsrc: " + m_spec.name;
@@ -232,17 +256,29 @@ private:
     try {
       while (true) {
         std::vector<SampleRef> samples;
+        std::vector<std::pair<int, int>> positions;
         bool all_eos;
         {
           std::unique_lock<std::mutex> lock(m_mutex);
           m_changed.wait(lock, [&] { return m_stopping || m_revision != rendered; });
           if (m_stopping) break;
           rendered = m_revision;
+          positions = m_positions;
           all_eos = true;
           for (const auto &input : m_inputs) {
             samples.emplace_back(input.latest ? gst_sample_ref(input.latest) : nullptr);
             all_eos = all_eos && input.eos;
           }
+        }
+        // Only this worker touches rendering specs and converters. Position
+        // requests share the sample mutex but never wait for conversion.
+        for (size_t i = 0; i < positions.size(); ++i) {
+          auto &region = m_spec.inputs[i];
+          if (region.x == positions[i].first && region.y == positions[i].second) continue;
+          region.x = positions[i].first;
+          region.y = positions[i].second;
+          auto &input = m_inputs[i];
+          if (input.converter) { gst_video_converter_free(input.converter); input.converter = nullptr; }
         }
         if (std::any_of(samples.begin(), samples.end(), [](const SampleRef &s) { return s.sample; })) {
           if (!m_pool) configure_output(samples);
@@ -365,6 +401,7 @@ private:
   std::thread m_worker;
   bool m_stopping = false;
   uint64_t m_revision = 0;
+  std::vector<std::pair<int, int>> m_positions;
 };
 } // namespace
 
@@ -396,4 +433,10 @@ bool LatestVideoMixers::start(GstElement *pipeline, const std::vector<LatestVide
   }
 }
 void LatestVideoMixers::stop() { m_impl->mixers.clear(); }
+bool LatestVideoMixers::update_positions(const std::string &name,
+    const std::vector<LatestVideoPosition> &positions) {
+  for (const auto &mixer : m_impl->mixers)
+    if (mixer->name() == name) return mixer->update_positions(positions);
+  return false;
+}
 } // namespace dvrk_video

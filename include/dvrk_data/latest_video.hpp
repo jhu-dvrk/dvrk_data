@@ -28,6 +28,11 @@ struct LatestVideoSpec {
   std::vector<LatestVideoInput> inputs;
 };
 
+struct LatestVideoPosition {
+  std::string input;
+  int x, y;
+};
+
 // Event-driven spatial composition. Each input owns one cached sample; a new
 // sample from ANY input renders the newest available images. Input PTS, cadence,
 // and EOS on the other inputs never gate selection. Missing images are black.
@@ -43,6 +48,11 @@ public:
   static std::string source(const std::string &name);
   bool start(GstElement *pipeline, const std::vector<LatestVideoSpec> &specs,
              std::string &error);
+  // Atomically queue positions for one mixer and redraw cached samples. Safe
+  // during rendering; callers must serialize this with start()/stop(). Invalid
+  // names, duplicate inputs or out-of-canvas rectangles leave positions intact.
+  bool update_positions(const std::string &mixer,
+                        const std::vector<LatestVideoPosition> &positions);
   // Call after the pipeline reaches NULL, before releasing it or restarting.
   void stop();
 
