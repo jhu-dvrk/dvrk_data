@@ -80,6 +80,7 @@ target_link_libraries(record
 add_executable(video_tag
   src/video_tag/tag_main.cpp
   src/video_tag/tag_ui.cpp
+  src/video_tag/video_view.cpp
 )
 target_include_directories(video_tag PRIVATE
   ${GST_INCLUDE_DIRS}
@@ -261,6 +262,15 @@ ament_export_include_directories(include)
 ament_export_dependencies(ament_index_cpp OpenCV)
 
 if(BUILD_TESTING)
+  add_executable(video_view_transform_test tests/video_view_transform_test.cpp)
+  target_include_directories(video_view_transform_test PRIVATE src/video_tag)
+  add_test(NAME video_view_transform COMMAND video_view_transform_test)
+  add_executable(held_frame_stepper_test tests/held_frame_stepper_test.cpp)
+  target_include_directories(held_frame_stepper_test PRIVATE include)
+  add_test(NAME held_frame_stepper COMMAND held_frame_stepper_test)
+  add_executable(video_tag_timestamps_test tests/video_tag_timestamps_test.cpp)
+  target_include_directories(video_tag_timestamps_test PRIVATE include)
+  add_test(NAME video_tag_timestamps COMMAND video_tag_timestamps_test)
   enable_testing()
   add_executable(stereo_color_adjustment_test tests/stereo_color_adjustment_test.cpp)
   target_link_libraries(stereo_color_adjustment_test dvrk_data)
@@ -283,6 +293,8 @@ if(BUILD_TESTING)
   add_test(NAME stereo_rectify COMMAND stereo_rectify_test)
   set_tests_properties(stereo_rectify PROPERTIES TIMEOUT 30)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME extract_timestamps COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/extract_timestamps_test.py)
+  set_tests_properties(extract_timestamps PROPERTIES TIMEOUT 30)
   add_test(NAME stereo_workflow COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/stereo_workflow_test.py)
   set_tests_properties(stereo_workflow PROPERTIES ENVIRONMENT "DVRK_DATA_TEST_BUILD=${CMAKE_CURRENT_BINARY_DIR};PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 30)
   add_test(NAME stereo_rectify_socket COMMAND ${Python3_EXECUTABLE}

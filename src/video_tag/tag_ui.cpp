@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <dvrk_data/collection_config.hpp>
 #include <dvrk_data/tags.hpp>
+#include <dvrk_data/video_timeline.hpp>
 
 namespace {
 
@@ -92,6 +93,9 @@ TagWindow::TagWindow(const std::string& video, const std::string&config, const s
     m_left_vbox.pack_start(m_current_stages_label, Gtk::PACK_SHRINK);
 
     m_video_container.set_size_request(800, 450);
+    m_video_container.pack_start(m_video_view, Gtk::PACK_EXPAND_WIDGET);
+    m_video_dispatch_connection = m_video_dispatcher.connect(
+        sigc::mem_fun(*this, &TagWindow::display_video_sample));
     m_left_vbox.pack_start(m_video_container, Gtk::PACK_EXPAND_WIDGET);
 
     m_info_label.set_text("Loading...");
@@ -120,19 +124,19 @@ TagWindow::TagWindow(const std::string& video, const std::string&config, const s
     m_controls_hbox.pack_start(m_begin_btn, Gtk::PACK_SHRINK);
 
     m_prev_btn.set_label("Previous");
-    m_prev_btn.set_tooltip_text("Previous frame (s)");
+    m_prev_btn.set_tooltip_text("Previous frame (S); hold to accelerate");
     m_prev_btn.signal_pressed().connect(sigc::mem_fun(*this, &TagWindow::on_prev_btn_pressed));
     m_prev_btn.signal_released().connect(sigc::mem_fun(*this, &TagWindow::on_prev_btn_released));
     m_controls_hbox.pack_start(m_prev_btn, Gtk::PACK_SHRINK);
 
     m_play_btn.set_label("Play");
-    m_play_btn.set_tooltip_text("Play/Pause (d)");
+    m_play_btn.set_tooltip_text("Play/Pause (D or Space)");
     m_play_btn.set_size_request(80, -1);
     m_play_btn.signal_clicked().connect(sigc::mem_fun(*this, &TagWindow::on_play_pause));
     m_controls_hbox.pack_start(m_play_btn, Gtk::PACK_SHRINK);
 
     m_next_btn.set_label("Next");
-    m_next_btn.set_tooltip_text("Next frame (f)");
+    m_next_btn.set_tooltip_text("Next frame (F); hold to accelerate");
     m_next_btn.signal_pressed().connect(sigc::mem_fun(*this, &TagWindow::on_next_btn_pressed));
     m_next_btn.signal_released().connect(sigc::mem_fun(*this, &TagWindow::on_next_btn_released));
     m_controls_hbox.pack_start(m_next_btn, Gtk::PACK_SHRINK);
@@ -145,8 +149,11 @@ TagWindow::TagWindow(const std::string& video, const std::string&config, const s
     m_speed_combo.append("1.25", "1.25x");
     m_speed_combo.append("1.5", "1.5x");
     m_speed_combo.append("2.0", "2.0x");
+    m_speed_combo.append("3.0", "3.0x");
+    m_speed_combo.append("4.0", "4.0x");
+    m_speed_combo.append("5.0", "5.0x");
     m_speed_combo.set_active_id("1.0");
-    m_speed_combo.set_tooltip_text("Adjust playback speed");
+    m_speed_combo.set_tooltip_text("Playback speed and maximum held-step speed");
     m_speed_combo.signal_changed().connect(sigc::mem_fun(*this, &TagWindow::on_speed_changed));
     m_controls_hbox.pack_start(m_speed_combo, Gtk::PACK_SHRINK);
 
@@ -189,13 +196,22 @@ TagWindow::TagWindow(const std::string& video, const std::string&config, const s
     m_timer_conn = Glib::signal_timeout().connect(sigc::mem_fun(*this, &TagWindow::on_ui_update_timer), 100);
     signal_key_press_event().connect(sigc::mem_fun(*this, &TagWindow::on_key_press), false);
     signal_key_release_event().connect(sigc::mem_fun(*this, &TagWindow::on_key_release), false);
+    signal_focus_out_event().connect([this](GdkEventFocus*) {
+        clear_step_inputs();
+        return false;
+    }, false);
 }
 
 TagWindow::~TagWindow() {
+    m_step_timer_conn.disconnect();
+    m_timer_conn.disconnect();
+    m_video_dispatch_connection.disconnect();
     if (m_data.pipeline) {
         gst_element_set_state(m_data.pipeline, GST_STATE_NULL);
+        if (m_data.video_sink) gst_object_unref(m_data.video_sink);
         gst_object_unref(m_data.pipeline);
     }
+    if (m_pending_video_sample) gst_sample_unref(m_pending_video_sample);
 }
 
 void TagWindow::add_tag_row(const std::string& tag_name) {
@@ -209,7 +225,8 @@ void TagWindow::add_tag_row(const std::string& tag_name) {
     m_tag_buttons[tag_name] = btn;
     btn->signal_clicked().connect([this, tag_name](){ on_tag_toggle(tag_name); });
 
-    auto* count_lbl = Gtk::make_managed<Gtk::Label>("0");
+    auto* count_lbl = Gtk::make_managed<Gtk::Label>();
+    count_lbl->set_markup("<b>0</b>");
     count_lbl->set_width_chars(3);
     count_lbl->set_margin_top(1);
     count_lbl->set_margin_bottom(1);
@@ -291,11 +308,11 @@ void TagWindow::load_sidecar_json() {
             m_data.frame_cpu_timestamps.push_back(cpu_ts);
             const long long t = pts.asInt64();
 
-            // DO NOT SUBTRACT first_gst_ts. 
-            // GStreamer pipeline (qtdemux/h264parse) uses absolute file PTS.
-            // When we seek, we want to go to the exact PTS stored in the sidecar.
+            // Recorder timestamps use the live pipeline clock. MP4 playback
+            // starts at zero; normalize the complete array after loading it.
             m_data.frame_gst_timestamps.push_back(t);
         }
+        dc::normalize_video_pts(m_data.frame_gst_timestamps);
     }
 
     if (root.isMember("start_cpu_realtime_ns")) {
@@ -327,11 +344,13 @@ void TagWindow::setup_pipeline() {
     load_sidecar_json();
 
     // Use an explicit software decode chain to avoid NVMM/NVV4L2 negotiation issues during playback.
-    // Assumes MP4/H.264 recording output from the recorder: filesrc -> qtdemux -> h264parse -> avdec_h264.
+    // Deliver native-resolution frames to the zoomable view on the GTK thread.
+    const char* pixel_format = G_BYTE_ORDER == G_LITTLE_ENDIAN ? "BGRx" : "xRGB";
     std::string pipe_str =
         "filesrc location=\"" + m_data.video_path +
         "\" ! qtdemux name=demux "
-        "demux.video_0 ! queue ! h264parse ! avdec_h264 ! videoconvert ! gtksink name=vsink sync=true";
+        "demux.video_0 ! queue ! h264parse ! avdec_h264 ! videoconvert ! video/x-raw,format=" +
+        std::string(pixel_format) + " ! appsink name=vsink sync=true max-buffers=1 drop=true";
     GError* err = nullptr;
     m_data.pipeline = gst_parse_launch(pipe_str.c_str(), &err);
     if (!m_data.pipeline) {
@@ -345,14 +364,10 @@ void TagWindow::setup_pipeline() {
 
     m_data.video_sink = gst_bin_get_by_name(GST_BIN(m_data.pipeline), "vsink");
 
-    // Get gtksink widget and pack it
-    GtkWidget* sink_widget = nullptr;
-    g_object_get(m_data.video_sink, "widget", &sink_widget, NULL);
-    if (sink_widget) {
-        Gtk::Widget* wrapped_widget = Glib::wrap(sink_widget);
-        m_video_container.pack_start(*wrapped_widget, Gtk::PACK_EXPAND_WIDGET);
-        wrapped_widget->show();
-    }
+    GstAppSinkCallbacks callbacks{};
+    callbacks.new_preroll = &TagWindow::on_video_preroll;
+    callbacks.new_sample = &TagWindow::on_video_sample;
+    gst_app_sink_set_callbacks(GST_APP_SINK(m_data.video_sink), &callbacks, this, nullptr);
 
     gst_element_set_state(m_data.pipeline, GST_STATE_PAUSED);
 
@@ -364,12 +379,7 @@ void TagWindow::setup_pipeline() {
     if (gst_element_query_duration(m_data.pipeline, GST_FORMAT_TIME, &duration)) {
         m_data.duration_ns = duration;
         
-        // Use recorded frame count based "virtual duration" for the UI if sidecar exists
-        if (!m_data.frame_gst_timestamps.empty()) {
-            m_data.session_duration_ns = (long long)((double)m_data.frame_gst_timestamps.size() / m_data.fps * 1e9);
-        } else if (m_data.session_duration_ns == 0) {
-            m_data.session_duration_ns = duration;
-        }
+        m_data.session_duration_ns = duration;
     }
 
     // Attempt to get FPS from sink caps
@@ -412,6 +422,43 @@ void TagWindow::setup_pipeline() {
     m_frame_slider.set_range(0, m_data.total_frames > 0 ? m_data.total_frames - 1 : 0);
 }
 
+GstFlowReturn TagWindow::on_video_preroll(GstAppSink* sink, gpointer user_data) {
+    return static_cast<TagWindow*>(user_data)->receive_video_sample(sink, true);
+}
+
+GstFlowReturn TagWindow::on_video_sample(GstAppSink* sink, gpointer user_data) {
+    return static_cast<TagWindow*>(user_data)->receive_video_sample(sink, false);
+}
+
+GstFlowReturn TagWindow::receive_video_sample(GstAppSink* sink, bool preroll) {
+    GstSample* sample = preroll ? gst_app_sink_pull_preroll(sink) : gst_app_sink_pull_sample(sink);
+    if (!sample) return GST_FLOW_FLUSHING;
+    bool notify = false;
+    {
+        std::lock_guard<std::mutex> lock(m_video_mutex);
+        if (m_pending_video_sample) gst_sample_unref(m_pending_video_sample);
+        m_pending_video_sample = sample;
+        notify = !m_video_notification_pending;
+        m_video_notification_pending = true;
+    }
+    if (notify) m_video_dispatcher.emit();
+    return GST_FLOW_OK;
+}
+
+void TagWindow::display_video_sample() {
+    GstSample* sample = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_video_mutex);
+        sample = m_pending_video_sample;
+        m_pending_video_sample = nullptr;
+        m_video_notification_pending = false;
+    }
+    if (sample) {
+        m_video_view.set_sample(sample);
+        gst_sample_unref(sample);
+    }
+}
+
 void TagWindow::do_seek(gint64 ns) {
     if (!m_data.pipeline) return;
     double speed = std::stod(m_speed_combo.get_active_id());
@@ -422,25 +469,27 @@ void TagWindow::do_seek(gint64 ns) {
 }
 
 void TagWindow::seek_to_frame(long long frame_idx) {
+    clear_step_inputs();
+    m_step_position_valid = false;
     if (frame_idx < 0) frame_idx = 0;
     if (frame_idx >= m_data.total_frames) frame_idx = m_data.total_frames - 1;
     
     // Update state first
     m_data.current_frame = frame_idx;
     
-    // Convert to timestamp
-    gint64 target_ns = 0;
-    if (!m_data.frame_gst_timestamps.empty() && frame_idx < (long long)m_data.frame_gst_timestamps.size()) {
-        target_ns = m_data.frame_gst_timestamps[frame_idx];
-    } else {
-        // Fallback if no sidecar
-        target_ns = (gint64)((double)frame_idx / m_data.fps * 1e9);
+    do_seek(frame_time_ns(frame_idx));
+}
+
+long long TagWindow::frame_time_ns(long long frame_idx) const {
+    if (frame_idx >= 0 && frame_idx < static_cast<long long>(m_data.frame_gst_timestamps.size())) {
+        return m_data.frame_gst_timestamps[frame_idx];
     }
-    
-    do_seek(target_ns);
+    return static_cast<long long>(static_cast<double>(std::max(0LL, frame_idx)) / m_data.fps * 1e9);
 }
 
 void TagWindow::on_play_pause() {
+    clear_step_inputs();
+    m_step_position_valid = false;
     GstState current, pending;
     gst_element_get_state(m_data.pipeline, &current, &pending, 0);
     if (current == GST_STATE_PLAYING) {
@@ -488,19 +537,6 @@ void TagWindow::on_begin() {
     seek_to_frame(0);
 }
 
-void TagWindow::on_prev_frame() {
-    if (m_data.pipeline) gst_element_set_state(m_data.pipeline, GST_STATE_PAUSED);
-    long long next_frame = std::max(0LL, m_data.current_frame - 1);
-    seek_to_frame(next_frame);
-}
-
-void TagWindow::on_next_frame() {
-    if (m_data.pipeline) gst_element_set_state(m_data.pipeline, GST_STATE_PAUSED);
-    long long max_frame = m_data.total_frames > 0 ? m_data.total_frames - 1 : 0;
-    long long next_frame = std::min(max_frame, m_data.current_frame + 1);
-    seek_to_frame(next_frame);
-}
-
 void TagWindow::on_frame_slider_moved() {
     if (m_internal_update) return;
     if (m_data.pipeline) gst_element_set_state(m_data.pipeline, GST_STATE_PAUSED);
@@ -509,6 +545,8 @@ void TagWindow::on_frame_slider_moved() {
 }
 
 void TagWindow::on_speed_changed() {
+    // The held-step timer reads the current maximum on every tick.
+    if (m_step_direction != 0) return;
     gint64 pos = 0;
     if (gst_element_query_position(m_data.pipeline, GST_FORMAT_TIME, &pos)) {
         do_seek(pos);
@@ -566,12 +604,13 @@ void TagWindow::update_tag_navigation_ui() {
     // Update labels and combo boxes
     for (auto const& [name, btn] : m_tag_buttons) {
         int count = tag_occurences.count(name) ? tag_occurences[name].size() : 0;
-        m_tag_count_labels[name]->set_text(std::to_string(count));
+        m_tag_count_labels[name]->set_markup("<b>" + std::to_string(count) + "</b>");
 
         auto* combo = m_tag_combos[name];
         if (count > 0) {
             combo->show();
             combo->remove_all();
+            int occurrence = 0;
             for (long long f : tag_occurences[name]) {
                 long long rel_ns = 0;
                 if (f >= 0 && f < (long long)m_data.frame_cpu_timestamps.size()) {
@@ -579,7 +618,8 @@ void TagWindow::update_tag_navigation_ui() {
                 } else {
                     rel_ns = (long long)((double)f / m_data.fps * 1e9);
                 }
-                combo->append(std::to_string(f), format_time_simple((double)rel_ns / 1e9));
+                combo->append(std::to_string(f), std::to_string(++occurrence) + ": " +
+                              format_time_simple((double)rel_ns / 1e9));
             }
         } else {
             combo->hide();
@@ -684,8 +724,8 @@ bool TagWindow::on_ui_update_timer() {
         }
 
         long long frame = ns_to_nearest_frame(pos);
-        long long virtual_ms = (long long)((double)frame / m_data.fps * 1000.0);
-        long long total_ms = (long long)((double)(m_data.total_frames - 1) / m_data.fps * 1000.0);
+        long long virtual_ms = frame_time_ns(frame) / 1000000;
+        long long total_ms = frame_time_ns(m_data.total_frames - 1) / 1000000;
         
         auto format_virtual_time = [](long long ms) {
             int mins = ms / 60000;
@@ -748,89 +788,121 @@ bool TagWindow::on_ui_update_timer() {
 }
 
 bool TagWindow::on_key_press(GdkEventKey* event) {
-    if (event->keyval == GDK_KEY_s) {
-        if (!m_key_s_pressed) {
-            m_key_s_pressed = true;
-            m_key_press_count = 1;
-            on_prev_frame();
-            if (!m_step_timer_conn.connected())
-                m_step_timer_conn = Glib::signal_timeout().connect(sigc::mem_fun(*this, &TagWindow::on_step_timer), 200);
-        }
-        return true;
-    }
-    if (event->keyval == GDK_KEY_f) {
-        if (!m_key_f_pressed) {
-            m_key_f_pressed = true;
-            m_key_press_count = 1;
-            on_next_frame();
-            if (!m_step_timer_conn.connected())
-                m_step_timer_conn = Glib::signal_timeout().connect(sigc::mem_fun(*this, &TagWindow::on_step_timer), 200);
-        }
-        return true;
-    }
-
-    switch (event->keyval) {
-        case GDK_KEY_d: on_play_pause(); return true;
+    bool* pressed = nullptr;
+    switch (gdk_keyval_to_lower(event->keyval)) {
+        case GDK_KEY_s: pressed = &m_key_s_pressed; break;
+        case GDK_KEY_d:
+            if (!m_key_d_pressed) {
+                on_play_pause();
+                m_key_d_pressed = true;
+            }
+            return true;
+        case GDK_KEY_f: pressed = &m_key_f_pressed; break;
+        case GDK_KEY_space:
+            if (!m_key_space_pressed) {
+                on_play_pause();
+                m_key_space_pressed = true;
+            }
+            return true;
         case GDK_KEY_a: on_begin(); return true;
         case GDK_KEY_q: close(); return true;
+        default: return false;
     }
-    return false;
+    // Ignore operating-system repeats; stepping is driven by monotonic time.
+    if (!*pressed) {
+        *pressed = true;
+        update_step_hold();
+    }
+    return true;
 }
 
 bool TagWindow::on_key_release(GdkEventKey* event) {
-    if (event->keyval == GDK_KEY_s) {
-        m_key_s_pressed = false;
-        return true;
+    switch (gdk_keyval_to_lower(event->keyval)) {
+        case GDK_KEY_s: m_key_s_pressed = false; break;
+        case GDK_KEY_d: m_key_d_pressed = false; return true;
+        case GDK_KEY_f: m_key_f_pressed = false; break;
+        case GDK_KEY_space: m_key_space_pressed = false; return true;
+        default: return false;
     }
-    if (event->keyval == GDK_KEY_f) {
-        m_key_f_pressed = false;
-        return true;
+    update_step_hold();
+    return true;
+}
+
+void TagWindow::update_step_hold() {
+    const bool backward = m_key_s_pressed || m_btn_prev_pressed;
+    const bool forward = m_key_f_pressed || m_btn_next_pressed;
+    const int direction = backward == forward ? 0 : (forward ? 1 : -1);
+    if (direction == m_step_direction) return;
+    m_step_timer_conn.disconnect();
+    m_step_direction = direction;
+    if (direction == 0 || !m_data.pipeline || m_data.total_frames == 0) return;
+
+    GstState current, pending;
+    gst_element_get_state(m_data.pipeline, &current, &pending, 0);
+    if (current == GST_STATE_PLAYING) {
+        m_step_position_valid = false;
+        gint64 position = 0;
+        if (gst_element_query_position(m_data.pipeline, GST_FORMAT_TIME, &position)) {
+            m_data.current_frame = ns_to_nearest_frame(position);
+        }
     }
-    return false;
+    gst_element_set_state(m_data.pipeline, GST_STATE_PAUSED);
+    m_play_btn.set_label("Play");
+    if (!m_step_position_valid) {
+        m_step_video_frame = std::llround(frame_time_ns(m_data.current_frame) * m_data.fps / 1e9);
+        m_step_position_valid = true;
+    }
+    step_video_frames(direction); // A tap always moves one encoded frame.
+    m_held_stepper.reset(g_get_monotonic_time() / 1e6);
+    m_step_timer_conn = Glib::signal_timeout().connect(
+        sigc::mem_fun(*this, &TagWindow::on_step_timer), 40);
+}
+
+void TagWindow::step_video_frames(long long delta) {
+    const long long last = std::max(0LL, std::llround(m_data.duration_ns * m_data.fps / 1e9) - 1);
+    const long long target = std::clamp(m_step_video_frame + delta, 0LL, last);
+    if (target == m_step_video_frame) return;
+    m_step_video_frame = target;
+    const auto timestamp = std::llround(target * 1e9 / m_data.fps);
+    m_data.current_frame = ns_to_nearest_frame(timestamp);
+    do_seek(timestamp);
 }
 
 bool TagWindow::on_step_timer() {
-    if (m_key_s_pressed || m_btn_prev_pressed) {
-        m_key_press_count++;
-        on_prev_frame();
-        if (m_key_press_count > 3) on_prev_frame(); // Double speed after 3 frames
-        return true;
-    }
-    if (m_key_f_pressed || m_btn_next_pressed) {
-        m_key_press_count++;
-        on_next_frame();
-        if (m_key_press_count > 3) on_next_frame(); // Double speed after 3 frames
-        return true;
-    }
-    return false; // Disconnect timer
+    if (m_step_direction == 0) return false;
+    const double max_speed = std::stod(m_speed_combo.get_active_id());
+    const long long frames = m_held_stepper.advance(
+        g_get_monotonic_time() / 1e6, m_data.fps, max_speed);
+    // Batch fast steps into one seek instead of decoding every skipped frame.
+    if (frames > 0) step_video_frames(m_step_direction * frames);
+    return true;
+}
+
+void TagWindow::clear_step_inputs() {
+    m_key_s_pressed = m_key_d_pressed = m_key_f_pressed = false;
+    m_key_space_pressed = false;
+    m_btn_prev_pressed = m_btn_next_pressed = false;
+    update_step_hold();
 }
 
 void TagWindow::on_prev_btn_pressed() {
-    if (!m_btn_prev_pressed) {
-        m_btn_prev_pressed = true;
-        m_key_press_count = 1;
-        on_prev_frame();
-        if (!m_step_timer_conn.connected())
-            m_step_timer_conn = Glib::signal_timeout().connect(sigc::mem_fun(*this, &TagWindow::on_step_timer), 200);
-    }
+    m_btn_prev_pressed = true;
+    update_step_hold();
 }
 
 void TagWindow::on_prev_btn_released() {
     m_btn_prev_pressed = false;
+    update_step_hold();
 }
 
 void TagWindow::on_next_btn_pressed() {
-    if (!m_btn_next_pressed) {
-        m_btn_next_pressed = true;
-        m_key_press_count = 1;
-        on_next_frame();
-        if (!m_step_timer_conn.connected())
-            m_step_timer_conn = Glib::signal_timeout().connect(sigc::mem_fun(*this, &TagWindow::on_step_timer), 200);
-    }
+    m_btn_next_pressed = true;
+    update_step_hold();
 }
 
 void TagWindow::on_next_btn_released() {
     m_btn_next_pressed = false;
+    update_step_hold();
 }
 
 std::string TagWindow::format_time(long long ns) {
@@ -876,8 +948,8 @@ void TagWindow::save_tags() {
                 std::string name = t.substr(0, t.length() - 6);
                 if (!open_starts[name].empty()) {
                      std::string error_msg = "Error: Stage '" + name + "' overlaps with itself! (Start at " + 
-                                            format_time( (long long)((double)open_starts[name].back() / m_data.fps * 1e9) ) + 
-                                            " and " + format_time( (long long)((double)frame / m_data.fps * 1e9) ) + ")";
+                                            format_time(frame_time_ns(open_starts[name].back())) +
+                                            " and " + format_time(frame_time_ns(frame)) + ")";
                      error_messages.push_back(error_msg); 
                 }
                 open_starts[name].push_back(frame);
@@ -925,8 +997,8 @@ void TagWindow::save_tags() {
 
             if (stage.start > stage.end) {
                 std::string error_msg = "Warning: Stage '" + name + "' has start > end! (" +
-                                       format_time_simple((double)stage.start / m_data.fps) + " > " +
-                                       format_time_simple((double)stage.end / m_data.fps) + ")";
+                                       format_time_simple(frame_time_ns(stage.start) / 1e9) + " > " +
+                                       format_time_simple(frame_time_ns(stage.end) / 1e9) + ")";
                 std::cerr << error_msg << std::endl;
                 m_info_label.set_text(error_msg);
             }

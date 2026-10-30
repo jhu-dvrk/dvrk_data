@@ -6,11 +6,16 @@ import argparse
 import sys
 import threading
 import csv
+import copy
 import rosbag2_py
 import multiprocessing
 import math
 import numpy as np
 import re
+import subprocess
+from bisect import bisect_left
+from fractions import Fraction
+from functools import lru_cache
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 from rosidl_runtime_py.convert import message_to_ordereddict
@@ -51,6 +56,139 @@ def explicit_annotation_timestamp_ns(frame):
     if _valid_timestamp(recorder):
         return recorder
     return None
+
+
+@lru_cache(maxsize=8)
+def video_timeline(video_path):
+    """Read encoded frames in presentation order, independently of sidecar rows."""
+    try:
+        def probe(entries):
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", entries, "-of", "json", video_path],
+                check=True, capture_output=True, text=True)
+            return json.loads(result.stdout)
+
+        # MP4 H.264/HEVC/MPEG-4 samples each hold one encoded picture. Reading
+        # packet timestamps avoids decoding a long recording just to index it.
+        data = probe("stream=codec_name,nb_frames,time_base,avg_frame_rate:packet=pts")
+        stream = data["streams"][0]
+        packets = data.get("packets", [])
+        if (stream.get("codec_name") in ("h264", "hevc", "mpeg4")
+                and str(len(packets)) == stream.get("nb_frames")
+                and all("pts" in packet for packet in packets)):
+            ticks = sorted(int(packet["pts"]) for packet in packets)
+        else:
+            data = probe("frame=best_effort_timestamp")
+            ticks = [int(frame["best_effort_timestamp"]) for frame in data["frames"]]
+        time_base = Fraction(stream["time_base"])
+        fps = float(Fraction(stream["avg_frame_rate"]))
+        pts = tuple(int(tick * time_base * 10**9) for tick in ticks)
+        if not pts or fps <= 0 or any(a > b for a, b in zip(pts, pts[1:])):
+            raise ValueError("missing or unordered frame timestamps / invalid frame rate")
+        return pts, fps
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError,
+            IndexError, ZeroDivisionError) as exc:
+        raise RuntimeError(
+            f"Cannot read video presentation timestamps for {video_path}: {exc}. "
+            "Ensure ffprobe (the ffmpeg package) is installed.") from exc
+
+
+def video_frame_range(video_pts, start_pts, end_pts):
+    """Match accurate timestamp seeks: the first frame at or after each boundary."""
+    if start_pts > end_pts:
+        raise ValueError("Video range ends before it starts")
+    start = bisect_left(video_pts, start_pts)
+    end = min(bisect_left(video_pts, end_pts), len(video_pts) - 1)
+    if start >= len(video_pts) or end_pts < video_pts[0]:
+        raise ValueError("Tagged timestamps are outside the encoded video")
+    return range(start, end + 1)
+
+
+def sidecar_video_pts(frames):
+    """Translate recorder pipeline PTS to the MP4's zero-based media timeline."""
+    origin = int(frames[0]["gst"]["pts_ns"])
+    return [int(frame["gst"]["pts_ns"]) - origin for frame in frames]
+
+
+def write_extracted_video_sidecars(data, json_path, video_path, output_dir,
+                                   video_basename, video_indices, video_pts,
+                                   side_by_side):
+    """Write one frame record per encoded output frame, retaining source clocks."""
+    observations = sorted((pts, i) for i, pts in enumerate(sidecar_video_pts(data["frames"])))
+    observation_pts = [pts for pts, _ in observations]
+    source_rows = []
+    for video_idx in video_indices:
+        pts = video_pts[video_idx]
+        row = bisect_left(observation_pts, pts)
+        if row == len(observations):
+            row -= 1
+        elif row > 0 and pts - observation_pts[row - 1] <= observation_pts[row] - pts:
+            row -= 1
+        source_rows.append(observations[row][1])
+
+    outputs = [(video_basename, "unsplit")]
+    if side_by_side in ("LR", "RL"):
+        outputs = [(video_basename + "_left", "left"),
+                   (video_basename + "_right", "right")]
+
+    for name, eye in outputs:
+        output_path = os.path.join(output_dir, name + ".mp4")
+        output_pts, output_fps = video_timeline(os.path.abspath(output_path))
+        if len(output_pts) != len(video_indices):
+            raise RuntimeError(f"Frame count mismatch writing sidecar for {output_path}")
+        result = copy.deepcopy({key: value for key, value in data.items() if key != "frames"})
+        result["video_file"] = name + ".mp4"
+        result["fps"] = output_fps
+        result["frames_recorded"] = len(output_pts)
+        result["frames_dropped"] = 0
+        # A split output is a single-eye video. Both source-eye observations
+        # stay in cpu.realtime, without replacing mono_source_ns or either eye.
+        result["side_by_side"] = data.get("side_by_side", "undefined") if eye == "unsplit" else "undefined"
+        result["extraction"] = {
+            "source_video_file": os.path.relpath(video_path, output_dir),
+            "source_sidecar_file": os.path.relpath(json_path, output_dir),
+            "source_side_by_side": data.get("side_by_side", "undefined"),
+            "source_pts_origin_ns": int(data["frames"][0]["gst"]["pts_ns"]),
+            "source_timestamp_statistics": copy.deepcopy(data.get("timestamp_statistics", {})),
+            "eye": eye,
+            "frame_mapping": "nearest_sidecar_pts",
+            "timestamp_statistics_basis": "source_timestamp_presence",
+        }
+        output_frames = []
+        for i, (video_idx, source_row) in enumerate(zip(video_indices, source_rows)):
+            frame = copy.deepcopy(data["frames"][source_row])
+            frame["source"] = {
+                "sidecar_index": source_row,
+                "frame_index": frame["frame_index"],
+                "video_frame_index": video_idx,
+                "video_pts_ns": video_pts[video_idx],
+                "gst": copy.deepcopy(frame["gst"]),
+            }
+            frame["frame_index"] = i
+            # OpenCV re-encodes the clip. Read its actual PTS instead of
+            # subtracting the clip start from the old GStreamer clock values.
+            duration = (output_pts[i + 1] - output_pts[i] if i + 1 < len(output_pts)
+                        else round(1e9 / output_fps))
+            frame["gst"] = {
+                "pts_ns": output_pts[i], "dts_ns": None, "duration_ns": duration,
+                "running_time_ns": output_pts[i], "stream_time_ns": output_pts[i],
+                "clock_time_ns": None,
+            }
+            output_frames.append(frame)
+        result["frames"] = output_frames
+        realtime = [frame["cpu"]["realtime"] for frame in output_frames]
+        result["start_cpu_realtime_ns"] = realtime[0].get("recorder_reception_ns") or explicit_annotation_timestamp_ns(output_frames[0])
+        result["end_cpu_realtime_ns"] = realtime[-1].get("recorder_reception_ns") or explicit_annotation_timestamp_ns(output_frames[-1])
+        from_source = sum(any(_valid_timestamp(row.get(key)) for key in
+                              ("mono_source_ns", "left_source_ns", "right_source_ns"))
+                          for row in realtime)
+        result["timestamp_statistics"] = {
+            "from_unixfd": from_source, "at_reception": len(output_frames) - from_source}
+        with open(os.path.join(output_dir, name + ".json"), "w") as f:
+            json.dump(result, f, indent=2)
+            f.write("\n")
+
 
 def flatten_dict(d, parent_key='', sep='.'):
     items = []
@@ -103,21 +241,29 @@ def rosbag_to_csv(bag_path, output_dir, start_ns=None, end_ns=None):
     try:
         reader_p1.open(rosbag2_py.StorageOptions(uri=bag_path, storage_id=storage_id),
                        rosbag2_py.ConverterOptions('', ''))
+        if start_ns is not None:
+            reader_p1.seek(start_ns)
     except Exception as e:
         print(f"Error opening rosbag for Pass 1: {e}")
         return
 
     topic_types = {topic.name: topic.type for topic in reader_p1.get_all_topics_and_types()}
+    message_classes = {}
     
+    # SequentialReader defaults to ascending received timestamps, so neither
+    # pass needs to scan messages outside the requested interval.
     while reader_p1.has_next():
         (topic, data, t) = reader_p1.read_next()
         if start_ns is not None and t < start_ns: continue
-        if end_ns is not None and t > end_ns: continue
+        if end_ns is not None and t > end_ns: break
         
         if topic not in topic_fields:
             topic_fields[topic] = set(['timestamp'])
             
-        msg_type = get_message(topic_types[topic])
+        type_name = topic_types[topic]
+        if type_name not in message_classes:
+            message_classes[type_name] = get_message(type_name)
+        msg_type = message_classes[type_name]
         msg = deserialize_message(data, msg_type)
         msg_dict = flatten_dict(message_to_ordereddict(msg))
         topic_fields[topic].update(msg_dict.keys())
@@ -130,6 +276,8 @@ def rosbag_to_csv(bag_path, output_dir, start_ns=None, end_ns=None):
     try:
         reader_p2.open(rosbag2_py.StorageOptions(uri=bag_path, storage_id=storage_id),
                        rosbag2_py.ConverterOptions('', ''))
+        if start_ns is not None:
+            reader_p2.seek(start_ns)
     except Exception as e:
         print(f"Error opening rosbag for Pass 2: {e}")
         return
@@ -141,7 +289,7 @@ def rosbag_to_csv(bag_path, output_dir, start_ns=None, end_ns=None):
         while reader_p2.has_next():
             (topic, data, t) = reader_p2.read_next()
             if start_ns is not None and t < start_ns: continue
-            if end_ns is not None and t > end_ns: continue
+            if end_ns is not None and t > end_ns: break
             
             if topic not in writers:
                 csv_name = topic.replace('/', '_').strip('_') + ".csv"
@@ -160,7 +308,7 @@ def rosbag_to_csv(bag_path, output_dir, start_ns=None, end_ns=None):
                 writers[topic] = csv.DictWriter(f, fieldnames=fieldnames)
                 writers[topic].writeheader()
             
-            msg_type = get_message(topic_types[topic])
+            msg_type = message_classes[topic_types[topic]]
             msg = deserialize_message(data, msg_type)
             row = {'timestamp': t}
             row.update(flatten_dict(message_to_ordereddict(msg)))
@@ -329,11 +477,13 @@ def extract_video_range(video_path, output_path, start_frame, end_frame, fps, or
                 current_pos = target_idx # Assume it works...
             
             if current_pos != target_idx:
+                 success = False
                  break
                  
             ret, frame = cap.read()
             if not ret:
                 print(f"Error: Could not read frame {target_idx}")
+                success = False
                 break
             
             process_frame(frame)
@@ -398,11 +548,26 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
     
     if not indices: return
     
-    video_indices = [int(frames[i].get("frame_index", i)) for i in indices]
-    
+    # Sidecar rows describe frames observed before encoding. Videorate may
+    # drop/duplicate those frames, so frame_index is not an MP4 seek position.
+    video_pts, fps = video_timeline(os.path.abspath(video_path))
+    observation_pts = sidecar_video_pts(frames)
+    if start_acq is None and end_acq is None:
+        video_indices = list(range(len(video_pts)))
+    else:
+        selected_pts = [observation_pts[i] for i in indices]
+        video_indices = list(video_frame_range(video_pts, min(selected_pts), max(selected_pts)))
     start_idx = video_indices[0]
     end_idx = video_indices[-1]
-    filtered_timestamps = [timestamps[i] for i in indices]
+
+    # Preserve observed CPU timestamps for image filenames, but seek using
+    # encoded PTS. Several observed frames may map to the same encoded frame.
+    image_frames = {}
+    if any(fmt != 'mp4' for fmt in formats):
+        for i in indices:
+            idx = bisect_left(video_pts, observation_pts[i])
+            if idx < len(video_pts):
+                image_frames.setdefault(idx, timestamps[i])
     video_basename = os.path.splitext(os.path.basename(video_path))[0]
     side_by_side = data.get("side_by_side", "undefined")
     if not split_stereo:
@@ -410,18 +575,24 @@ def extract_session_data(json_path, output_dir, formats, num_jobs, start_acq=Non
     
     for fmt in formats:
         if fmt == 'mp4':
-            fps = data.get("fps") or 30.0
             out_all_name = f"{video_basename}.mp4"
             print(f"Extracting video segment: {out_all_name}")
-            extract_video_range(video_path, os.path.join(output_dir, out_all_name), start_idx, end_idx, fps, video_indices, side_by_side)
+            if not extract_video_range(video_path, os.path.join(output_dir, out_all_name), start_idx, end_idx, fps, video_indices, side_by_side):
+                raise RuntimeError(f"Video extraction failed for {video_path}")
+            write_extracted_video_sidecars(data, json_path, video_path, output_dir,
+                                           video_basename, video_indices, video_pts,
+                                           side_by_side)
         else:
+            image_indices = sorted(image_frames)
+            if not image_indices:
+                raise ValueError(f"No sidecar timestamps overlap {video_path}")
             tasks = []
-            chunk_size = math.ceil(len(video_indices) / num_jobs)
+            chunk_size = math.ceil(len(image_indices) / num_jobs)
             for i in range(num_jobs):
                 s = i * chunk_size
-                e = min((i + 1) * chunk_size, len(video_indices))
-                if s >= len(video_indices): break
-                tasks.append((video_path, output_dir, [filtered_timestamps[k] for k in range(s, e)], video_indices[s:e], fmt, video_basename, is_ns, is_ms, side_by_side))
+                e = min((i + 1) * chunk_size, len(image_indices))
+                if s >= len(image_indices): break
+                tasks.append((video_path, output_dir, [image_frames[idx] for idx in image_indices[s:e]], image_indices[s:e], fmt, video_basename, is_ns, is_ms, side_by_side))
             
             if num_jobs > 1:
                 with multiprocessing.Pool(processes=num_jobs) as pool: pool.map(process_video_chunk, tasks)
@@ -531,6 +702,9 @@ def main():
             ts_e, f_e = parse_stage_timestamp(stage.get("end"))
             
             def resolve_acq(ts, f):
+                # Use the same timestamp priority as video_tag when loading tags.
+                if ts is not None:
+                    return int(ts)
                 # Handle types
                 if f is not None:
                     try: f = int(f)
@@ -542,9 +716,6 @@ def main():
                         if final_val is not None:
                             return int(final_val)
                 
-                if ts is not None:
-                    return int(ts)
-
                 return None
 
             start_val = resolve_acq(ts_s, f_s)

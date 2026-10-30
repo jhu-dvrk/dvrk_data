@@ -3,10 +3,14 @@
 
 #include <gtkmm.h>
 #include <gst/gst.h>
+#include <gst/app/gstappsink.h>
+#include <mutex>
+#include "video_view.hpp"
 #include <string>
 #include <vector>
 #include <map>
 #include <json/json.h>
+#include <dvrk_data/held_frame_stepper.hpp>
 
 struct TagData {
     std::string video_path;
@@ -47,8 +51,6 @@ protected:
     // UI Signal Handlers
     void on_begin();
     void on_play_pause();
-    void on_prev_frame();
-    void on_next_frame();
     void on_slider_moved();
     void on_frame_slider_moved();
     void on_speed_changed();
@@ -60,14 +62,22 @@ protected:
     bool on_key_press(GdkEventKey* event);
     bool on_key_release(GdkEventKey* event);
     bool on_step_timer();
+    void update_step_hold();
+    void clear_step_inputs();
+    void step_video_frames(long long delta);
 
     // Helper methods
     void load_config(const std::string& path);
     void add_tag_row(const std::string& tag_name);
     void load_sidecar_json();
     void setup_pipeline();
+    static GstFlowReturn on_video_preroll(GstAppSink* sink, gpointer user_data);
+    static GstFlowReturn on_video_sample(GstAppSink* sink, gpointer user_data);
+    GstFlowReturn receive_video_sample(GstAppSink* sink, bool preroll);
+    void display_video_sample();
     void do_seek(gint64 ns);
     void seek_to_frame(long long frame_idx);
+    long long frame_time_ns(long long frame_idx) const;
     void update_ui_state();
     void save_tags();
     void load_tags(const std::string& explicit_path = "");
@@ -86,10 +96,15 @@ protected:
     bool m_load_session_tags = false;
 
     bool m_key_s_pressed = false;
+    bool m_key_d_pressed = false;
     bool m_key_f_pressed = false;
+    bool m_key_space_pressed = false;
     bool m_btn_prev_pressed = false;
     bool m_btn_next_pressed = false;
-    int m_key_press_count = 0;
+    int m_step_direction = 0;
+    long long m_step_video_frame = 0;
+    bool m_step_position_valid = false;
+    dc::HeldFrameStepper m_held_stepper;
     sigc::connection m_step_timer_conn;
 
     // GUI Handlers
@@ -103,7 +118,13 @@ protected:
     Gtk::Box m_left_vbox;
     Gtk::Box m_right_vbox;
 
-    Gtk::Box m_video_container; // Container for GstGtkSink widget
+    Gtk::Box m_video_container;
+    VideoView m_video_view;
+    Glib::Dispatcher m_video_dispatcher;
+    sigc::connection m_video_dispatch_connection;
+    std::mutex m_video_mutex;
+    GstSample* m_pending_video_sample = nullptr;
+    bool m_video_notification_pending = false;
     Gtk::Label m_current_stages_label;
     Gtk::Label m_info_label;
     Gtk::Label m_stats_label;

@@ -16,6 +16,62 @@
       "const": "dvrk_data:video_sidecar@1.0.0",
       "description": "Versioned document-type identifier used by readers to select this exact schema."
     },
+    "fps": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Encoded output frame rate, when supplied by extraction."
+    },
+    "extraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Provenance for an extracted video. Each output frame retains both source-eye CPU timestamps; source observations are matched by nearest PTS, not guaranteed encoder ancestry.",
+      "required": [
+        "source_video_file",
+        "source_sidecar_file",
+        "source_side_by_side",
+        "source_timestamp_statistics",
+        "eye",
+        "frame_mapping"
+      ],
+      "properties": {
+        "source_video_file": {
+          "type": "string",
+          "description": "Source video path relative to this sidecar directory."
+        },
+        "source_sidecar_file": {
+          "type": "string",
+          "description": "Source sidecar path relative to this sidecar directory."
+        },
+        "source_pts_origin_ns": {
+          "$ref": "#/$defs/nonnegativeInteger",
+          "description": "Recorder PTS origin subtracted when mapping observations to source MP4 playback time. Original values remain in frames[].source.gst."
+        },
+        "source_side_by_side": {
+          "enum": [
+            "undefined",
+            "LR",
+            "RL"
+          ]
+        },
+        "source_timestamp_statistics": {
+          "$ref": "#/properties/timestamp_statistics"
+        },
+        "eye": {
+          "enum": [
+            "unsplit",
+            "left",
+            "right"
+          ]
+        },
+        "timestamp_statistics_basis": {
+          "const": "source_timestamp_presence",
+          "description": "Output timestamp counts classify copied observations by availability of mono/left/right source timestamps. Original recording counts are retained separately."
+        },
+        "frame_mapping": {
+          "const": "nearest_sidecar_pts"
+        }
+      }
+    },
     "video_file": {
       "type": "string",
       "minLength": 1,
@@ -141,6 +197,95 @@
       "additionalProperties": false,
       "required": ["frame_index", "gst", "cpu"],
       "properties": {
+        "reference_timestamps": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mono": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "reference": {
+                    "type": "string"
+                  },
+                  "timestamp_ns": {
+                    "$ref": "#/$defs/nullableTimestamp"
+                  },
+                  "duration_ns": {
+                    "$ref": "#/$defs/nullableTimestamp"
+                  }
+                }
+              }
+            },
+            "left": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "reference": {
+                    "type": "string"
+                  },
+                  "timestamp_ns": {
+                    "$ref": "#/$defs/nullableTimestamp"
+                  },
+                  "duration_ns": {
+                    "$ref": "#/$defs/nullableTimestamp"
+                  }
+                }
+              }
+            },
+            "right": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "reference": {
+                    "type": "string"
+                  },
+                  "timestamp_ns": {
+                    "$ref": "#/$defs/nullableTimestamp"
+                  },
+                  "duration_ns": {
+                    "$ref": "#/$defs/nullableTimestamp"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The source encoded frame and nearest sidecar observation for this output frame. CPU fields remain the unchanged observed values. gst stores the original observation timeline; the output frame gst fields describe the extracted clip.",
+          "required": [
+            "sidecar_index",
+            "frame_index",
+            "video_frame_index",
+            "video_pts_ns",
+            "gst"
+          ],
+          "properties": {
+            "sidecar_index": {
+              "$ref": "#/$defs/nonnegativeInteger"
+            },
+            "frame_index": {
+              "$ref": "#/$defs/nonnegativeInteger"
+            },
+            "video_frame_index": {
+              "$ref": "#/$defs/nonnegativeInteger"
+            },
+            "video_pts_ns": {
+              "$ref": "#/$defs/nonnegativeInteger"
+            },
+            "gst": {
+              "$ref": "#/$defs/frame/properties/gst"
+            }
+          }
+        },
         "frame_index": {
           "$ref": "#/$defs/nonnegativeInteger",
           "description": "Zero-based index of this frame within the recorded video segment and frames array."
@@ -200,6 +345,12 @@
                 "right_source_ns": {
                   "$ref": "#/$defs/nullableTimestamp",
                   "description": "Time the right-eye source produced or timestamped this frame; null when unavailable."
+                },
+                "source_stereo_output_ns": {
+                  "$ref": "#/$defs/nullableTimestamp"
+                },
+                "alignment_output_ns": {
+                  "$ref": "#/$defs/nullableTimestamp"
                 },
                 "stereo_output_ns": {
                   "$ref": "#/$defs/nullableTimestamp",
