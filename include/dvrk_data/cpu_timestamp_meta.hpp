@@ -36,8 +36,9 @@ struct DcFrameTimestamps {
 inline const GstMetaInfo *dc_frame_timestamps_meta_register() {
     static const GstMetaInfo *info = nullptr;
     if (g_once_init_enter(&info)) {
-        const GstMetaInfo *new_info =
-            gst_meta_register_custom_simple(DC_FRAME_TIMESTAMPS_META_NAME);
+        const GstMetaInfo *new_info = gst_meta_get_info(DC_FRAME_TIMESTAMPS_META_NAME);
+        if (!new_info)
+            new_info = gst_meta_register_custom_simple(DC_FRAME_TIMESTAMPS_META_NAME);
         g_once_init_leave(&info, new_info);
     }
     return info;

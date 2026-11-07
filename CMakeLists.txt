@@ -11,6 +11,9 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+set(PYBIND11_FINDPYTHON ON)
+find_package(pybind11 CONFIG REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -20,10 +23,12 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc calib3d aruco videoio imgco
 
 pkg_check_modules(JSONCPP REQUIRED jsoncpp)
 pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0 gstreamer-allocators-1.0)
+pkg_check_modules(PYGOBJECT REQUIRED IMPORTED_TARGET pygobject-3.0)
 pkg_check_modules(GTK REQUIRED gtk+-3.0)
 pkg_check_modules(GTKMM REQUIRED gtkmm-3.0)
 
 add_library(dvrk_data
+  src/video_layout.cpp
   src/latest_video.cpp
   src/config.cpp
   src/color_adjustment.cpp
@@ -233,6 +238,14 @@ install(DIRECTORY include/
 
 ament_python_install_package(${PROJECT_NAME})
 
+pybind11_add_module(_video_timestamps src/python/video_timestamps.cpp)
+target_include_directories(_video_timestamps PRIVATE include ${GST_INCLUDE_DIRS})
+target_compile_options(_video_timestamps PRIVATE ${GST_CFLAGS_OTHER})
+target_link_libraries(_video_timestamps PRIVATE ${GST_LIBRARIES} PkgConfig::PYGOBJECT)
+ament_get_python_install_dir(PYTHON_INSTALL_DIR)
+install(TARGETS _video_timestamps
+  LIBRARY DESTINATION "${PYTHON_INSTALL_DIR}/${PROJECT_NAME}")
+
 install(PROGRAMS
   scripts/stereo_find_color_adjustment
   scripts/generate_charuco_board.py
@@ -262,6 +275,14 @@ ament_export_dependencies(ament_index_cpp OpenCV)
 
 if(BUILD_TESTING)
   enable_testing()
+  add_executable(video_layout_test tests/video_layout_test.cpp)
+  target_link_libraries(video_layout_test dvrk_data)
+  add_test(NAME video_layout COMMAND video_layout_test --unit)
+  add_test(NAME video_layout_socket COMMAND video_layout_test)
+  set_tests_properties(video_layout_socket PROPERTIES TIMEOUT 10)
+  add_test(NAME python_video_timestamps COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/python_video_timestamps_test.py
+    $<TARGET_FILE:_video_timestamps>)
   add_executable(stereo_color_adjustment_test tests/stereo_color_adjustment_test.cpp)
   target_link_libraries(stereo_color_adjustment_test dvrk_data)
   add_test(NAME stereo_color_adjustment COMMAND stereo_color_adjustment_test)
