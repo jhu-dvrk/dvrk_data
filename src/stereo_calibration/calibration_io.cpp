@@ -3,6 +3,7 @@
 
 #include "dvrk_data/calibration/calibration_io.hpp"
 
+#include <json/json.h>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include "dvrk_data/calibration/board_config.hpp"
@@ -107,6 +108,19 @@ bool CalibrationIO::load_calibration_archive(const std::string &archive_dir,
             (void)path;
             if (!right.count(id)) throw std::runtime_error("Missing right image for sample " + std::to_string(id));
         }
+        Json::Value retained;
+        const auto mask_path=root / "retained_corners.json";
+        if (fs::exists(mask_path)) {
+            std::ifstream input(mask_path);
+            Json::CharReaderBuilder reader; std::string parse_error;
+            if (!Json::parseFromStream(reader,input,&retained,&parse_error) || !retained.isObject())
+                throw std::runtime_error("Invalid retained corner manifest: "+parse_error);
+            for (const auto &name:retained.getMemberNames()) {
+                if (name.empty() || name.find_first_not_of("0123456789")!=std::string::npos ||
+                    !left.count(std::stoi(name)) || std::to_string(std::stoi(name))!=name || !retained[name].isArray())
+                    throw std::runtime_error("Invalid sample in retained corner manifest");
+            }
+        }
         CharucoDetector detector(loaded_board);
         StereoCalibrator restored;
         for (const auto &[id, path] : left) {
@@ -118,9 +132,35 @@ bool CalibrationIO::load_calibration_archive(const std::string &archive_dir,
                 (restored.frame_count() && l.size() != restored.expected_image_size()))
                 throw std::runtime_error("Missing, unreadable or mismatched images for sample " + std::to_string(id));
             StereoDetection detection;
-            if (!detector.detect_stereo(l, r, detection) ||
-                restored.add_frame(l, r, detection, id) < 0)
+            if (!detector.detect_stereo(l,r,detection))
                 throw std::runtime_error("Could not detect enough common ChArUco corners in sample " + std::to_string(id));
+            const auto key=std::to_string(id);
+            if (retained.isMember(key)) {
+                std::set<int> ids;
+                for (const auto &value:retained[key])
+                    if (!value.isInt() || value.asInt()<0 || !ids.insert(value.asInt()).second)
+                        throw std::runtime_error("Invalid or duplicate retained corner ID");
+                StereoDetection filtered=detection;
+                filtered.common_ids.clear(); filtered.left_common_corners.clear();
+                filtered.right_common_corners.clear(); filtered.object_points.clear();
+                for (size_t k=0;k<detection.common_ids.size();++k) if (ids.count(detection.common_ids[k])) {
+                    filtered.common_ids.push_back(detection.common_ids[k]);
+                    filtered.left_common_corners.push_back(detection.left_common_corners[k]);
+                    filtered.right_common_corners.push_back(detection.right_common_corners[k]);
+                    filtered.object_points.push_back(detection.object_points[k]);
+                }
+                if (ids.size()<6 || filtered.common_ids.size()!=ids.size())
+                    throw std::runtime_error("Saved retained corners missing from detection in sample "+key);
+                bool spans_plane=false;
+                const auto &objects=filtered.object_points;
+                for (size_t i=1;i<objects.size() && !spans_plane;++i)
+                    for (size_t j=i+1;j<objects.size();++j)
+                        if (cv::norm((objects[i]-objects[0]).cross(objects[j]-objects[0]))>1e-6) { spans_plane=true; break; }
+                if (!spans_plane) throw std::runtime_error("Retained corners do not span the board plane in sample "+key);
+                detection=std::move(filtered);
+            }
+            if (restored.add_frame(l,r,detection,id)<0)
+                throw std::runtime_error("Invalid retained sample "+key);
         }
         if (progress_cb) progress_cb(1.0, "Calibration images loaded");
         board = loaded_board;
@@ -173,12 +213,23 @@ bool CalibrationIO::save_calibration_archive(const std::string &output_dir,
             throw std::runtime_error("Could not save board settings: " + board_error);
         fs::create_directory(created / "left");
         fs::create_directory(created / "right");
+        Json::Value retained(Json::objectValue);
         for (const auto &frame : frames) {
+            if (!frame.charuco_ids.empty()) {
+                auto &ids=retained[std::to_string(frame.id)]; ids=Json::Value(Json::arrayValue);
+                for (int id:frame.charuco_ids) ids.append(id);
+            }
             std::ostringstream filename;
             filename << "sample_" << std::setw(6) << std::setfill('0') << frame.id << ".png";
             if (!cv::imwrite((created / "left" / filename.str()).string(), frame.left_image) ||
                 !cv::imwrite((created / "right" / filename.str()).string(), frame.right_image))
                 throw std::runtime_error("Could not write raw images for sample " + std::to_string(frame.id));
+        }
+        if (!retained.empty()) {
+            std::ofstream manifest(created / "retained_corners.json");
+            manifest << retained;
+            manifest.close();
+            if (!manifest) throw std::runtime_error("Could not write retained corner manifest");
         }
         archive_dir = created.string();
         return true;

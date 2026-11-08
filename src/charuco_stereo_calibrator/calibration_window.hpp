@@ -12,6 +12,7 @@
 #include "dvrk_data/calibration/board_config.hpp"
 
 #include <gtkmm.h>
+#include <array>
 #include <mutex>
 #include <memory>
 #include <string>
@@ -24,16 +25,17 @@ enum class DisplayMode {
     COVERAGE_HEATMAP,
     RECTIFIED_EPIPOLAR,
     GRID_VALIDATION,
+    LENS_DISTORTION,
     ANAGLYPH_3D
 };
 
 class VideoArea : public Gtk::DrawingArea {
 public:
     VideoArea();
-    ~VideoArea() override = default;
 
     void set_image(const cv::Mat &bgr_mat);
-    void set_active_epipolar_y(int y);
+    void set_hover_enabled(bool enabled);
+    sigc::signal<void, double, double> signal_image_hovered;
     void set_navigation_enabled(bool enabled);
 
 protected:
@@ -51,11 +53,13 @@ private:
     double m_zoom = 1.0;
     double m_pan_x = 0.0, m_pan_y = 0.0;
     double m_drag_x = 0.0, m_drag_y = 0.0;
+    double m_press_x = 0.0, m_press_y = 0.0;
+    bool m_drag_moved = false;
     std::mutex m_mutex;
     Glib::RefPtr<Gdk::Pixbuf> m_pixbuf;
     int m_img_width = 0;
     int m_img_height = 0;
-    int m_active_y = -1;
+    bool m_hover_enabled = false;
 };
 
 class CalibrationWindow : public Gtk::Window {
@@ -81,9 +85,17 @@ private:
     void on_save_clicked();
     void on_display_mode_changed();
     void show_selected_grid();
+    void show_lens_distortion();
+    void rebuild_coverage();
+    std::array<CoveragePose,2> current_coverage_poses(const StereoDetection &detection) const;
+    bool capture_is_useful(const StereoDetection &detection, cv::Size size, std::string &reason);
+    void refresh_nested_data();
+    void show_live_coverage(const cv::Mat &left, const cv::Mat &right,
+                            const StereoDetection &detection);
+    void show_coverage_view();
 
     // Stream frame callback
-    void handle_new_frame(const cv::Mat &left, const cv::Mat &right, uint64_t ts);
+    void handle_new_frame(const cv::Mat &left, const cv::Mat &right);
 
     // Helpers
     void update_coverage_ui();
@@ -117,8 +129,8 @@ private:
     cv::Mat m_current_left;
     cv::Mat m_current_right;
     StereoDetection m_current_detection;
-    uint64_t m_current_ts = 0;
     bool m_has_new_frame = false;
+    bool m_frame_dispatch_pending = false;
     std::chrono::steady_clock::time_point m_last_frame_time;
     bool m_frame_is_stale = true;
 
@@ -170,6 +182,7 @@ private:
     Gtk::Box m_capture_box;
     Gtk::Label m_stationarity_badge;
     Gtk::Label m_corners_count_label;
+    Gtk::SpinButton m_density_target;
     Gtk::CheckButton m_auto_capture_check;
     Gtk::Button m_capture_button;
     Gtk::Label m_frames_count_label;
@@ -200,6 +213,9 @@ private:
     Gtk::SpinButton m_rectification_alpha;
     Gtk::Button m_calibrate_button;
     Gtk::Button m_filter_outliers_button;
+    Gtk::Label m_outlier_report_label;
+    std::unique_ptr<StereoCalibrator> m_filter_backup;
+    int m_filter_selected_sample = -1;
     Gtk::ProgressBar m_calib_progress_bar;
     Gtk::Label m_rms_label;
     Gtk::Label m_baseline_label;
@@ -212,6 +228,18 @@ private:
     Gtk::CheckButton m_save_images_check{"Include raw calibration images"};
     Gtk::Button m_save_button;
     Gtk::Label m_validation_label;
+    Gtk::ComboBoxText m_projection_mode_combo;
+    Gtk::ComboBoxText m_corner_combo;
+    Gtk::SpinButton m_residual_scale;
+    bool m_updating_validation = false;
+    int m_corner_sample_id = -1;
+    NestedCoverageData m_nested_data, m_nested_right_data;
+    std::vector<NestedCoverageTile> m_hover_tiles;
+    bool m_nested_dirty = true;
+    bool m_overlay_dirty = true;
+    NestedCoverageChart m_overlay_left, m_overlay_right;
+    cv::Mat m_overlay_left_retention, m_overlay_right_retention;
+    cv::Mat m_live_stereo;
 
     // Asynchronous Background Calibration
     std::atomic<bool> m_is_calibrating{false};

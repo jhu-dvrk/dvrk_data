@@ -1,6 +1,7 @@
 #include "calibration_archive_fixture.hpp"
 #include <opencv2/imgcodecs.hpp>
 #include <iostream>
+#include <algorithm>
 
 void check(bool value, const char *message) { if (!value) throw std::runtime_error(message); }
 int main() {
@@ -27,6 +28,23 @@ int main() {
     check(detector.detect_stereo(fixture.image, fixture.image, detection), "Cannot detect synthetic board");
     check(restored.add_frame(fixture.image, fixture.image, detection) == 11, "New capture reused an imported ID");
     check(restored.add_frame(fixture.image, fixture.image, detection, 2) < 0, "Duplicate restored ID accepted");
+    // Archive retained IDs so filtered corners cannot return during redetection.
+    auto reduced=restored.get_frames();
+    const int excluded=reduced[0].charuco_ids.back();
+    reduced[0].charuco_ids.pop_back(); reduced[0].left_corners.pop_back();
+    reduced[0].right_corners.pop_back(); reduced[0].object_points.pop_back();
+    std::string filtered_archive;
+    check(CalibrationIO::save_calibration_archive(fixture.root.string(),reduced,board,filtered_archive,error),error.c_str());
+    StereoCalibrator filtered; CharucoConfig filtered_board;
+    check(CalibrationIO::load_calibration_archive(filtered_archive,filtered_board,filtered,error),error.c_str());
+    check(filtered.get_frames()[0].charuco_ids==reduced[0].charuco_ids &&
+          std::find(filtered.get_frames()[0].charuco_ids.begin(),filtered.get_frames()[0].charuco_ids.end(),excluded)==filtered.get_frames()[0].charuco_ids.end(),
+          "Reload resurrected an excluded corner");
+    check(cv::norm(filtered.get_frames()[0].left_image,fixture.image,cv::NORM_INF)==0,
+          "Retained corner mask must not alter raw images");
+    std::ofstream(std::filesystem::path(filtered_archive)/"retained_corners.json") << "{\"2\":[1,1,2,3,4,5]}";
+    check(!CalibrationIO::load_calibration_archive(filtered_archive,filtered_board,filtered,error) && filtered.frame_count()==3,
+          "Invalid retained corner manifest must fail transactionally");
     board.motion_threshold_px = 123.0f;
     auto fails_without_changes = [&] {
         check(!CalibrationIO::load_calibration_archive(fixture.archive, board, restored, error) && !error.empty(),

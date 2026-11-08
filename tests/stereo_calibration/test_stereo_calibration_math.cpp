@@ -14,6 +14,7 @@
 #include <regex>
 #include <sstream>
 #include <cassert>
+#include <limits>
 #include <filesystem>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
@@ -147,6 +148,15 @@ int main() {
         return 1;
     }
 
+    for (const auto &frame : calibrator.get_frames()) {
+        const auto diagnostics = dvrk_data::calibration::StereoCalibrator::diagnose_sample(frame, result);
+        if (!std::isfinite(diagnostics.epipolar_rms_px) ||
+            std::abs(diagnostics.epipolar_rms_px-result.epipolar_rms_by_id.at(frame.id)) > 1e-6) {
+            std::cerr << "Viewer and filter epipolar metrics disagree" << std::endl;
+            return 1;
+        }
+    }
+
     // Validate projection with known intrinsics, unequal eyes, distortion and
     // a nontrivial stereo rotation. Pose must be estimated, not taken from capture.
     using namespace dvrk_data::calibration;
@@ -190,10 +200,56 @@ int main() {
             std::cerr << "Known-geometry grid reprojection failed: " << err << std::endl;
             return 1;
         }
+        cv::Mat Q;
+        cv::stereoRectify(truth.K1, truth.D1, truth.K2, truth.D2, img_size,
+                         truth.R, truth.T, truth.R1, truth.R2, truth.P1, truth.P2, Q);
+        const auto perfect = StereoCalibrator::diagnose_sample(sample, truth);
+        if (!perfect.left_fit.valid || !perfect.right_fit.valid ||
+            !perfect.left_to_right.valid || !perfect.right_to_left.valid ||
+            perfect.right_fit.rms_px > 0.001 || perfect.right_to_left.rms_px > 0.001 ||
+            perfect.epipolar_rms_px > 0.001 ||
+            perfect.left_fit.corners.size() != sample.charuco_ids.size()) {
+            std::cerr << "Bidirectional perfect-geometry diagnostics failed" << std::endl;
+            return 1;
+        }
+        for (size_t i = 0; i < sample.charuco_ids.size(); ++i) {
+            const auto &c = perfect.left_fit.corners[i];
+            if (c.id != sample.charuco_ids[i] || cv::norm(c.delta-(c.projected-c.detected)) > 1e-6) return 1;
+        }
+        auto noisy = sample;
+        noisy.right_corners[0] += cv::Point2f(8, -6);
+        const auto localized = StereoCalibrator::diagnose_sample(noisy, truth);
+        if (localized.left_fit.rms_px > 0.001 || localized.left_to_right.corners[0].magnitude_px < 9.99 ||
+            localized.right_fit.rms_px < 0.1 || localized.epipolar_rms_px < 0.1) {
+            std::cerr << "Single-corner error was not localized to the right camera" << std::endl;
+            return 1;
+        }
+        auto wrong_camera = truth;
+        wrong_camera.K2 = truth.K2.clone();
+        wrong_camera.K2.at<double>(0,0) *= 1.15;
+        const auto bad_camera = StereoCalibrator::diagnose_sample(sample, wrong_camera);
+        if (bad_camera.left_fit.rms_px > 0.001 || bad_camera.left_to_right.rms_px < 1) {
+            std::cerr << "Right camera parameter error was not exposed" << std::endl;
+            return 1;
+        }
+        auto malformed = sample;
+        malformed.right_corners[0].x = std::numeric_limits<float>::quiet_NaN();
+        const auto invalid = StereoCalibrator::diagnose_sample(malformed, truth);
+        if (invalid.right_fit.valid || !std::isnan(invalid.right_fit.rms_px) || invalid.right_fit.reason.empty()) return 1;
+        for (const auto mode : {ProjectionMode::INDEPENDENT, ProjectionMode::LEFT_TO_RIGHT, ProjectionMode::RIGHT_TO_LEFT}) {
+            if (!StereoCalibrator::render_grid(sample, charuco_cfg, truth, perfect, mode, 3,
+                                               sample.charuco_ids[0], projection, err)) return 1;
+        }
         truth.T.at<double>(1) += 1.0;
         if (!StereoCalibrator::reproject_grid(sample, charuco_cfg, truth, projection, err) ||
             projection.right_rms_px < 3.0 || projection.left_rms_px > 0.001) {
             std::cerr << "Grid validation did not expose incorrect stereo translation" << std::endl;
+            return 1;
+        }
+        const auto bad_stereo = StereoCalibrator::diagnose_sample(sample, truth);
+        if (bad_stereo.left_fit.rms_px > 0.001 || bad_stereo.right_fit.rms_px > 0.001 ||
+            bad_stereo.left_to_right.rms_px < 3 || bad_stereo.right_to_left.rms_px < 3) {
+            std::cerr << "Stereo extrinsic error should affect cross predictions, not independent fits" << std::endl;
             return 1;
         }
         truth.T.at<double>(1) -= 1.0;
@@ -407,9 +463,73 @@ int main() {
         return 1;
     }
 
-    if (result.per_frame_error_by_id.empty() || result.per_frame_error_by_id.size() != result.per_frame_rms.size()) {
-        std::cerr << "result.per_frame_error_by_id is missing or has wrong size!" << std::endl;
+    if (result.epipolar_rms_by_id.empty() || result.epipolar_rms_by_id.size() != result.per_frame_epipolar_rms_px.size()) {
+        std::cerr << "result.epipolar_rms_by_id is missing or has wrong size!" << std::endl;
         return 1;
+    }
+
+    // Test that skipped frames (< 6 corners or collinear) do not desynchronize epipolar_rms_by_id
+    {
+        StereoCalibrator skip_calibrator;
+        const auto frames = calibrator.get_frames();
+        for (size_t i = 0; i < frames.size(); ++i) {
+            if (i == 2) {
+                // Insert a frame with 6 collinear points (accepted by add_frame, skipped by calibrate)
+                StereoDetection det;
+                det.is_stereo_valid = true;
+                det.object_points = {
+                    cv::Point3f(0, 0, 0), cv::Point3f(1, 0, 0), cv::Point3f(2, 0, 0),
+                    cv::Point3f(3, 0, 0), cv::Point3f(4, 0, 0), cv::Point3f(5, 0, 0)
+                };
+                det.left_common_corners = {
+                    cv::Point2f(10, 10), cv::Point2f(20, 10), cv::Point2f(30, 10),
+                    cv::Point2f(40, 10), cv::Point2f(50, 10), cv::Point2f(60, 10)
+                };
+                det.right_common_corners = det.left_common_corners;
+                det.common_ids = {0, 1, 2, 3, 4, 5};
+                cv::Mat dummy(img_size, CV_8UC3, cv::Scalar(0));
+                int added_id = skip_calibrator.add_frame(dummy, dummy, det);
+                if (added_id < 0) {
+                    std::cerr << "Failed to add collinear frame to test calibrator" << std::endl;
+                    return 1;
+                }
+            }
+            StereoDetection det;
+            det.is_stereo_valid = true;
+            det.object_points = frames[i].object_points;
+            det.left_common_corners = frames[i].left_corners;
+            det.right_common_corners = frames[i].right_corners;
+            det.common_ids = frames[i].charuco_ids;
+            cv::Mat dummy(img_size, CV_8UC3, cv::Scalar(0));
+            skip_calibrator.add_frame(dummy, dummy, det);
+        }
+        StereoCalibrationResult skip_result;
+        std::string skip_err;
+        if (!skip_calibrator.calibrate(opts, skip_result, skip_err)) {
+            std::cerr << "Calibration with a skipped frame failed: " << skip_err << std::endl;
+            return 1;
+        }
+        const auto &skip_frames = skip_calibrator.get_frames();
+        int skipped_id = skip_frames[2].id;
+        if (skip_result.epipolar_rms_by_id.count(skipped_id) != 0) {
+            std::cerr << "Skipped frame ID should not be present in epipolar_rms_by_id!" << std::endl;
+            return 1;
+        }
+        if (!std::isnan(skip_frames[2].epipolar_rms_px)) {
+            std::cerr << "Skipped frame epipolar RMS should remain unavailable (NaN)!" << std::endl;
+            return 1;
+        }
+        for (size_t i = 3; i < skip_frames.size(); ++i) {
+            int fid = skip_frames[i].id;
+            if (skip_result.epipolar_rms_by_id.count(fid) == 0) {
+                std::cerr << "Valid frame after skipped frame missing in epipolar_rms_by_id: ID " << fid << std::endl;
+                return 1;
+            }
+            if (skip_frames[i].epipolar_rms_px != skip_result.epipolar_rms_by_id[fid]) {
+                std::cerr << "Frame epipolar RMS mismatch for ID " << fid << std::endl;
+                return 1;
+            }
+        }
     }
 
     // Test that rectify_stereo rejects mismatched image dimensions

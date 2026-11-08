@@ -167,6 +167,8 @@ add_library(dvrk_stereo_calibration
   src/stereo_calibration/charuco_detector.cpp
   src/stereo_calibration/coverage_tracker.cpp
   src/stereo_calibration/gst_stereo_receiver.cpp
+  src/stereo_calibration/lens_distortion.cpp
+  src/stereo_calibration/outlier_filter.cpp
   src/stereo_calibration/stereo_calibrator.cpp
   src/stereo_calibration/rectification.cpp
 )
@@ -306,6 +308,14 @@ if(BUILD_TESTING)
   target_link_libraries(calibration_window_test dvrk_calibration_gui)
   add_test(NAME calibration_window COMMAND calibration_window_test)
   set_tests_properties(calibration_window PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 20)
+  add_executable(outlier_filter_test tests/stereo_calibration/outlier_filter_test.cpp)
+  target_link_libraries(outlier_filter_test dvrk_stereo_calibration)
+  add_test(NAME calibration_outlier_filter COMMAND outlier_filter_test)
+
+  add_executable(lens_distortion_test tests/stereo_calibration/lens_distortion_test.cpp)
+  target_link_libraries(lens_distortion_test dvrk_stereo_calibration)
+  add_test(NAME calibration_lens_distortion COMMAND lens_distortion_test)
+
   add_executable(test_coverage_tracker tests/stereo_calibration/test_coverage_tracker.cpp)
   target_link_libraries(test_coverage_tracker dvrk_stereo_calibration)
   add_test(NAME calibration_coverage COMMAND test_coverage_tracker)

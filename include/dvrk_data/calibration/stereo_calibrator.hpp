@@ -11,6 +11,7 @@
 #include <string>
 #include <memory>
 #include <map>
+#include <limits>
 #include <opencv2/core.hpp>
 
 namespace dvrk_data::calibration {
@@ -30,7 +31,7 @@ struct CalibrationFrame {
     std::vector<cv::Point3f> object_points;
     cv::Vec3d rvec{0, 0, 0};
     bool pose_valid = false;
-    double reprojection_error = 0.0;
+    double epipolar_rms_px = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct CalibratorOptions {
@@ -75,14 +76,46 @@ struct StereoCalibrationResult {
     double baseline_mm = 0.0;
     double avg_epipolar_error_px = 0.0;
     double max_epipolar_error_px = 0.0;
-    std::vector<double> per_frame_rms;
-    std::map<int, double> per_frame_error_by_id;
+    std::vector<double> per_frame_epipolar_rms_px;
+    std::map<int, double> epipolar_rms_by_id;
 };
+
+// A missing metric is NaN with a reason; it must never appear as a perfect fit.
+struct CornerResidual {
+    int id = -1;
+    cv::Point2f detected, projected, delta; // projected - detected, pixels
+    double magnitude_px = 0.0;
+};
+
+struct ProjectionDiagnostics {
+    bool valid = false;
+    std::string reason;
+    double rms_px = std::numeric_limits<double>::quiet_NaN();
+    cv::Vec3d rvec{0, 0, 0}, tvec{0, 0, 0};
+    std::vector<CornerResidual> corners;
+};
+
+struct SampleDiagnostics {
+    ProjectionDiagnostics left_fit, right_fit, left_to_right, right_to_left;
+    double epipolar_rms_px = std::numeric_limits<double>::quiet_NaN();
+    std::string epipolar_reason;
+    std::map<int,double> epipolar_by_corner_id;
+};
+
+struct OutlierFilterReport {
+    int removed_samples = 0, removed_corners = 0;
+    int protected_samples = 0, protected_corners = 0, review_samples = 0;
+    bool widespread_disagreement = false;
+    std::vector<std::string> decisions;
+    std::string summary() const;
+};
+
+enum class ProjectionMode { LEFT_TO_RIGHT, INDEPENDENT, RIGHT_TO_LEFT };
 
 struct GridReprojection {
     cv::Mat left_overlay, right_overlay;
-    double left_rms_px = 0.0;
-    double right_rms_px = 0.0;
+    double left_rms_px = std::numeric_limits<double>::quiet_NaN();
+    double right_rms_px = std::numeric_limits<double>::quiet_NaN();
 };
 
 class StereoCalibrator {
@@ -126,6 +159,20 @@ public:
                    std::string &error_msg,
                    ProgressCallback progress_cb = nullptr);
 
+    /// Compute all metrics without rendering; safe to call after any sample/model change.
+    static SampleDiagnostics diagnose_sample(const CalibrationFrame &frame,
+                                             const StereoCalibrationResult &calib, bool robust_pose = false);
+
+    /// One conservative pass with frozen coverage bins and paired corner removal.
+    OutlierFilterReport filter_outliers(const StereoCalibrationResult &calib, int target_density = 2);
+
+    /// Render previously computed diagnostics, with one common residual color scale.
+    static bool render_grid(const CalibrationFrame &frame, const CharucoConfig &board,
+                            const StereoCalibrationResult &calib,
+                            const SampleDiagnostics &diagnostics, ProjectionMode mode,
+                            double color_max_px, int selected_corner_id,
+                            GridReprojection &output, std::string &error_msg);
+
     /// Fit board pose in the left eye and project the grid into both raw images.
     /// The right pose uses calibrated R/T, so its residual also checks stereo geometry.
     static bool reproject_grid(const CalibrationFrame &frame,
@@ -147,8 +194,7 @@ public:
     /// Create side-by-side visualization with horizontal epipolar alignment lines
     static cv::Mat make_side_by_side_epipolar(const cv::Mat &rect_left,
                                               const cv::Mat &rect_right,
-                                              int line_spacing = 32,
-                                              int active_line_y = -1);
+                                              int line_spacing = 32);
 
 private:
     std::vector<CalibrationFrame> m_frames;

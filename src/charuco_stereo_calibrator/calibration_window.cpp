@@ -2,8 +2,10 @@
 // Copyright (c) 2026 Johns Hopkins University, LCSR
 
 #include "calibration_window.hpp"
+#include "dvrk_data/calibration/lens_distortion.hpp"
 
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -25,40 +27,29 @@ VideoArea::VideoArea() {
 }
 
 void VideoArea::set_image(const cv::Mat &bgr_mat) {
-    if (bgr_mat.empty()) return;
-
-    cv::Mat rgb;
-    if (bgr_mat.channels() == 3) {
-        cv::cvtColor(bgr_mat, rgb, cv::COLOR_BGR2RGB);
-    } else if (bgr_mat.channels() == 1) {
-        cv::cvtColor(bgr_mat, rgb, cv::COLOR_GRAY2RGB);
-    } else {
-        rgb = bgr_mat;
-    }
-
-    auto pixbuf = Gdk::Pixbuf::create(Gdk::COLORSPACE_RGB, false, 8, rgb.cols, rgb.rows);
-    int rowstride = pixbuf->get_rowstride();
-    uint8_t *dest = pixbuf->get_pixels();
-
-    for (int y = 0; y < rgb.rows; ++y) {
-        std::memcpy(dest + y * rowstride, rgb.ptr(y), rgb.cols * 3);
-    }
-
+    if (bgr_mat.empty() || bgr_mat.depth() != CV_8U) return;
+    const int channels = bgr_mat.channels();
+    if (channels != 1 && channels != 3 && channels != 4) return;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_img_width != rgb.cols || m_img_height != rgb.rows) reset_navigation();
-        m_pixbuf = pixbuf;
-        m_img_width = rgb.cols;
-        m_img_height = rgb.rows;
+        if (!m_pixbuf || m_img_width != bgr_mat.cols || m_img_height != bgr_mat.rows) {
+            reset_navigation();
+            m_pixbuf = Gdk::Pixbuf::create(Gdk::COLORSPACE_RGB,false,8,bgr_mat.cols,bgr_mat.rows);
+            m_img_width = bgr_mat.cols; m_img_height = bgr_mat.rows;
+        }
+        // Convert directly into the reusable display buffer instead of allocating
+        // an RGB image and copying it into a new pixbuf for every video frame.
+        cv::Mat rgb(m_img_height,m_img_width,CV_8UC3,m_pixbuf->get_pixels(),m_pixbuf->get_rowstride());
+        cv::cvtColor(bgr_mat,rgb,channels == 1 ? cv::COLOR_GRAY2RGB :
+                     channels == 4 ? cv::COLOR_BGRA2RGB : cv::COLOR_BGR2RGB);
     }
-
     queue_draw();
 }
 
-void VideoArea::set_active_epipolar_y(int y) {
+void VideoArea::set_hover_enabled(bool enabled) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_active_y = y;
-    queue_draw();
+    m_hover_enabled = enabled;
+    if (!enabled) set_tooltip_text("");
 }
 
 void VideoArea::reset_navigation() {
@@ -101,7 +92,6 @@ bool VideoArea::on_draw(const Cairo::RefPtr<Cairo::Context> &cr) {
 
     double scale, dest_x, dest_y;
     image_transform(scale, dest_x, dest_y);
-    const double dest_w = m_img_width * scale;
     // Draw through Cairo's transform; zoom never allocates an enlarged image.
     cr->save();
     cr->translate(dest_x, dest_y);
@@ -111,44 +101,22 @@ bool VideoArea::on_draw(const Cairo::RefPtr<Cairo::Context> &cr) {
     cr->fill();
     cr->restore();
 
-    // Draw active epipolar guideline if set
-    if (!m_navigation_enabled && m_active_y >= 0 && m_active_y < m_img_height) {
-        int screen_y = dest_y + static_cast<int>(m_active_y * scale);
-        cr->set_source_rgb(1.0, 1.0, 0.0); // Bright Yellow
-        cr->set_line_width(2.0);
-        cr->move_to(dest_x, screen_y);
-        cr->line_to(dest_x + dest_w, screen_y);
-        cr->stroke();
-    }
-
     return true;
 }
 
 bool VideoArea::on_button_press_event(GdkEventButton *event) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_pixbuf || m_img_width <= 0 || m_img_height <= 0) return false;
-
-    if (event->button != 1) return false;
+    if (!m_pixbuf || m_img_width <= 0 || m_img_height <= 0 || event->button != 1) return false;
     if (m_navigation_enabled) {
         if (event->type == GDK_2BUTTON_PRESS) {
-            reset_navigation();
-            queue_draw();
+            reset_navigation(); queue_draw();
         } else {
-            m_dragging = true;
-            m_drag_x = event->x;
-            m_drag_y = event->y;
+            m_dragging = true; m_drag_moved = false;
+            m_press_x = m_drag_x = event->x; m_press_y = m_drag_y = event->y;
         }
         return true;
     }
-    double scale, dest_x, dest_y;
-    image_transform(scale, dest_x, dest_y);
-    const int clicked_img_y = static_cast<int>((event->y - dest_y) / scale);
-    if (event->x >= dest_x && event->x < dest_x + m_img_width * scale &&
-        event->y >= dest_y && clicked_img_y < m_img_height) {
-        m_active_y = clicked_img_y;
-        queue_draw();
-    }
-    return true;
+    return false;
 }
 
 bool VideoArea::on_button_release_event(GdkEventButton *event) {
@@ -159,16 +127,20 @@ bool VideoArea::on_button_release_event(GdkEventButton *event) {
 }
 
 bool VideoArea::on_motion_notify_event(GdkEventMotion *event) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_navigation_enabled || !m_dragging) return false;
-    if (!(event->state & GDK_BUTTON1_MASK)) {
-        m_dragging = false;
-        return false;
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if (m_hover_enabled && !m_dragging && m_pixbuf) {
+        double scale, x, y; image_transform(scale,x,y);
+        const double ix = (event->x-x)/scale, iy = (event->y-y)/scale;
+        lock.unlock();
+        signal_image_hovered.emit(ix,iy);
+        return true;
     }
-    m_pan_x += event->x - m_drag_x;
-    m_pan_y += event->y - m_drag_y;
-    m_drag_x = event->x;
-    m_drag_y = event->y;
+    if (!m_navigation_enabled || !m_dragging) return false;
+    if (!(event->state & GDK_BUTTON1_MASK)) { m_dragging = false; return false; }
+    if (std::hypot(event->x-m_press_x,event->y-m_press_y) > 3) m_drag_moved = true;
+    if (!m_drag_moved) return true;
+    m_pan_x += event->x-m_drag_x; m_pan_y += event->y-m_drag_y;
+    m_drag_x = event->x; m_drag_y = event->y;
     queue_draw();
     return true;
 }
@@ -222,7 +194,7 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
       m_source_box(Gtk::ORIENTATION_VERTICAL, 4),
       m_board_box(Gtk::ORIENTATION_VERTICAL, 4),
       m_capture_box(Gtk::ORIENTATION_VERTICAL, 6),
-      m_auto_capture_check("Auto-capture when stationary & novel"),
+      m_auto_capture_check("Auto-capture when stationary & useful"),
       m_capture_button("Capture Current Frame"),
       m_frame_buttons_box(Gtk::ORIENTATION_HORIZONTAL, 6),
       m_delete_frame_button("Delete Selected"),
@@ -274,6 +246,8 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     // 1. Large Status Guidance (Visible from across room)
     m_big_status_label.set_markup("<span font_weight='bold' font_size='xx-large' foreground='#6c757d'>INITIALIZING...</span>");
     m_big_status_label.set_alignment(0.0, 0.5);
+    m_big_status_label.set_line_wrap(true);
+    m_big_status_label.set_max_width_chars(38);
     m_top_banner_box.pack_start(m_big_status_label, Gtk::PACK_EXPAND_WIDGET);
 
     m_top_banner_box.pack_start(m_top_sep1, Gtk::PACK_SHRINK);
@@ -286,14 +260,14 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_top_banner_box.pack_start(m_top_sep2, Gtk::PACK_SHRINK);
 
     // 3. Large Progress Bars (Spatial & Tilt)
-    m_progress_spatial_title.set_markup("<b>Coverage:</b>");
+    m_progress_spatial_title.set_markup("<b>X/Y density:</b>");
     m_progress_spatial_box.pack_start(m_progress_spatial_title, Gtk::PACK_SHRINK);
     m_big_spatial_progress.set_size_request(200, 28);
     m_big_spatial_progress.set_show_text(true);
     m_progress_spatial_box.pack_start(m_big_spatial_progress, Gtk::PACK_EXPAND_WIDGET);
     m_top_progress_box.pack_start(m_progress_spatial_box, Gtk::PACK_SHRINK);
 
-    m_progress_tilt_title.set_markup("<b>Tilt FOV:</b>");
+    m_progress_tilt_title.set_markup("<b>5D density:</b>");
     m_progress_tilt_box.pack_start(m_progress_tilt_title, Gtk::PACK_SHRINK);
     m_big_tilt_progress.set_size_request(200, 28);
     m_big_tilt_progress.set_show_text(true);
@@ -344,10 +318,28 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_capture_box.set_border_width(6);
 
     m_stationarity_badge.set_markup("<b>Status: Initializing...</b>");
+    m_stationarity_badge.set_line_wrap(true);
+    m_stationarity_badge.set_max_width_chars(44);
     m_capture_box.pack_start(m_stationarity_badge, Gtk::PACK_SHRINK);
 
     m_corners_count_label.set_text("Corners: 0");
     m_capture_box.pack_start(m_corners_count_label, Gtk::PACK_SHRINK);
+
+    m_density_target.set_name("coverage-density-target");
+    m_density_target.set_range(1,20);
+    m_density_target.set_increments(1,1);
+    m_density_target.set_digits(0);
+    m_density_target.set_numeric(true);
+    m_density_target.set_value(NestedCoverageData::default_target_samples);
+    m_density_target.set_tooltip_text("Retained images per frontal or tilted X/Y/Z orientation bin needed for green coverage");
+    auto *density_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL,4));
+    density_box->pack_start(*Gtk::manage(new Gtk::Label("Target density:")),Gtk::PACK_SHRINK);
+    density_box->pack_start(m_density_target,Gtk::PACK_EXPAND_WIDGET);
+    m_capture_box.pack_start(*density_box,Gtk::PACK_SHRINK);
+    m_density_target.signal_value_changed().connect([this] {
+        m_nested_dirty = true;
+        update_coverage_ui();
+    });
 
     m_auto_capture_check.set_active(true);
     m_auto_capture_check.signal_toggled().connect([this] {
@@ -365,15 +357,17 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_frames_tree_view.set_model(m_frames_list_store);
     m_frames_tree_view.append_column("ID", m_frame_cols.col_id);
     m_frames_tree_view.append_column("Corners", m_frame_cols.col_corners);
-    m_frames_tree_view.append_column("Error (px)", m_frame_cols.col_error);
+    m_frames_tree_view.append_column("Epipolar RMS (px)", m_frame_cols.col_error);
     m_frames_tree_view.get_column(0)->set_sort_column(m_frame_cols.col_id);
     m_frames_tree_view.get_column(1)->set_sort_column(m_frame_cols.col_corners);
     m_frames_tree_view.get_column(2)->set_sort_column(m_frame_cols.col_error_value);
     m_frames_list_store->set_sort_column(m_frame_cols.col_id, Gtk::SORT_ASCENDING);
     m_frames_tree_view.get_selection()->signal_changed().connect([this] {
-        if (m_is_calibrating.load()) return;
+        if (m_is_calibrating.load() || m_updating_validation ||
+            m_display_mode == DisplayMode::LENS_DISTORTION) return;
         if (m_frames_tree_view.get_selection()->get_selected()) {
-            if (m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
+            if (m_display_mode == DisplayMode::COVERAGE_HEATMAP) show_coverage_view();
+            else if (m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
             else m_display_mode_combo.set_active_id("validation");
         } else if (m_display_mode == DisplayMode::GRID_VALIDATION) {
             show_selected_grid();
@@ -382,12 +376,14 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
 
     // A click on an already selected row should also reopen validation.
     m_frames_tree_view.signal_button_release_event().connect([this](GdkEventButton *event) {
-        if (event->button != 1 || m_is_calibrating.load())
+        if (event->button != 1 || m_is_calibrating.load() ||
+            m_display_mode == DisplayMode::LENS_DISTORTION)
             return false;
         Gtk::TreeModel::Path path;
         if (m_frames_tree_view.get_path_at_pos(static_cast<int>(event->x),
                                               static_cast<int>(event->y), path)) {
-            if (m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
+            if (m_display_mode == DisplayMode::COVERAGE_HEATMAP) show_coverage_view();
+            else if (m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
             else m_display_mode_combo.set_active_id("validation");
         }
         return false;
@@ -445,9 +441,15 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_calibrate_button.signal_clicked().connect(sigc::mem_fun(*this, &CalibrationWindow::on_calibrate_clicked));
     m_calib_box.pack_start(m_calibrate_button, Gtk::PACK_SHRINK);
 
+    m_filter_outliers_button.set_tooltip_text("Remove localized bad corner pairs or inconsistent samples only when retained density is preserved in both eyes. High RMS alone does not cause removal.");
     m_filter_outliers_button.set_sensitive(false);
     m_filter_outliers_button.signal_clicked().connect(sigc::mem_fun(*this, &CalibrationWindow::on_filter_outliers_clicked));
     m_calib_box.pack_start(m_filter_outliers_button, Gtk::PACK_SHRINK);
+    m_outlier_report_label.set_name("outlier-filter-report");
+    m_outlier_report_label.set_line_wrap(true);
+    m_outlier_report_label.set_max_width_chars(44);
+    m_outlier_report_label.set_alignment(0.0,0.5);
+    m_calib_box.pack_start(m_outlier_report_label,Gtk::PACK_SHRINK);
 
     m_calib_progress_bar.set_size_request(-1, 24);
     m_calib_progress_bar.set_show_text(true);
@@ -455,7 +457,7 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     m_calib_progress_bar.set_fraction(0.0);
     m_calib_box.pack_start(m_calib_progress_bar, Gtk::PACK_SHRINK);
 
-    m_rms_label.set_markup("RMS Reprojection Error: <b>--</b>");
+    m_rms_label.set_markup("Stereo optimization RMS: <b>--</b>");
     m_baseline_label.set_markup("Baseline: <b>--</b>");
     m_epipolar_err_label.set_markup("Vertical Disparity Error: <b>--</b>");
     m_calib_box.pack_start(m_rms_label, Gtk::PACK_SHRINK);
@@ -472,17 +474,56 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
     Gtk::Box *view_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 4));
     view_box->pack_start(*Gtk::manage(new Gtk::Label("View:")), Gtk::PACK_SHRINK);
     m_display_mode_combo.append("tracking", "Live Tracking HUD");
-    m_display_mode_combo.append("heatmap", "Coverage Heatmap Overlay");
+    m_display_mode_combo.append("heatmap", "Live 5D Coverage Overlay");
     m_display_mode_combo.append("rectified", "Rectified Stereo (Epipolar)");
     m_display_mode_combo.append("anaglyph", "Red-Cyan 3D Anaglyph");
     m_display_mode_combo.append("validation", "Selected Sample: Grid Reprojection");
+    m_display_mode_combo.append("distortion", "Lens Distortion");
     m_display_mode_combo.set_active_id("heatmap");
     m_display_mode_combo.signal_changed().connect(sigc::mem_fun(*this, &CalibrationWindow::on_display_mode_changed));
     view_box->pack_start(m_display_mode_combo, Gtk::PACK_EXPAND_WIDGET);
     m_display_box.pack_start(*view_box, Gtk::PACK_SHRINK);
 
+    m_video_area.signal_image_hovered.connect([this](double x, double y) {
+        if (m_display_mode != DisplayMode::COVERAGE_HEATMAP) return;
+        for (const auto &tile : m_hover_tiles) if (tile.bounds.contains(cv::Point(x,y)) && !tile.inner_bounds.contains(cv::Point(x,y))) {
+            m_video_area.set_tooltip_text(CoverageTracker::describe_nested_tile(tile.right_eye ? m_nested_right_data : m_nested_data,tile));
+            return;
+        }
+        m_video_area.set_tooltip_text("Wheel: zoom. Left drag: pan. Double-click: fit.");
+    });
+
+    m_projection_mode_combo.append("left", "Pose from left -> right");
+    m_projection_mode_combo.append("independent", "Independent left / right fits");
+    m_projection_mode_combo.append("right", "Pose from right -> left");
+    m_projection_mode_combo.set_active_id("left");
+    m_projection_mode_combo.set_tooltip_text("Choose the source of the board pose for validation");
+    m_display_box.pack_start(m_projection_mode_combo, Gtk::PACK_SHRINK);
+    m_projection_mode_combo.signal_changed().connect([this] {
+        if (!m_updating_validation && m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
+    });
+    m_residual_scale.set_range(0.1, 100.0);
+    m_residual_scale.set_increments(0.5, 1.0);
+    m_residual_scale.set_digits(1);
+    m_residual_scale.set_value(3.0);
+    m_residual_scale.set_tooltip_text("Residual color scale maximum in pixels; also the count threshold");
+    auto *scale_box = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL, 4));
+    scale_box->pack_start(*Gtk::manage(new Gtk::Label("Red at / count above (px):")), Gtk::PACK_SHRINK);
+    scale_box->pack_start(m_residual_scale, Gtk::PACK_EXPAND_WIDGET);
+    m_display_box.pack_start(*scale_box, Gtk::PACK_SHRINK);
+    m_residual_scale.signal_value_changed().connect([this] {
+        if (m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
+    });
+    m_corner_combo.set_tooltip_text("Select a ChArUco corner ID to inspect its residual in each eye");
+    m_display_box.pack_start(m_corner_combo, Gtk::PACK_SHRINK);
+    m_corner_combo.signal_changed().connect([this] {
+        if (!m_updating_validation && m_display_mode == DisplayMode::GRID_VALIDATION) show_selected_grid();
+    });
+
     m_validation_label.set_text("After calibration, click a sample to validate its grid.");
+    m_validation_label.set_no_show_all(true);
     m_validation_label.set_line_wrap(true);
+    m_validation_label.set_max_width_chars(48);
     m_validation_label.set_alignment(0.0, 0.5);
     m_display_box.pack_start(m_validation_label, Gtk::PACK_SHRINK);
 
@@ -502,14 +543,19 @@ CalibrationWindow::CalibrationWindow(const std::string &board_config_file,
 
     // Start video streaming (with non-blocking auto-reconnect)
     m_receiver->start(m_receiver_config);
-    m_receiver->set_callback([this](const cv::Mat &l, const cv::Mat &r, uint64_t ts) {
-        handle_new_frame(l, r, ts);
+    m_receiver->set_callback([this](const cv::Mat &l, const cv::Mat &r, uint64_t) {
+        handle_new_frame(l, r);
     });
 
     m_timer_connection = Glib::signal_timeout().connect(sigc::mem_fun(*this, &CalibrationWindow::on_timer_tick), 250);
 
+    m_video_area.set_hover_enabled(true);
+    m_video_area.set_navigation_enabled(true);
     update_coverage_ui();
     show_all_children();
+    m_projection_mode_combo.set_sensitive(false);
+    m_corner_combo.set_sensitive(false);
+    m_residual_scale.set_sensitive(false);
 }
 
 void CalibrationWindow::update_board_ui() {
@@ -536,7 +582,7 @@ CalibrationWindow::~CalibrationWindow() {
     }
 }
 
-void CalibrationWindow::handle_new_frame(const cv::Mat &left, const cv::Mat &right, uint64_t ts) {
+void CalibrationWindow::handle_new_frame(const cv::Mat &left, const cv::Mat &right) {
     // Stop video frame processing & marker detection while calibration is computing
     if (m_is_calibrating.load()) {
         return;
@@ -545,28 +591,34 @@ void CalibrationWindow::handle_new_frame(const cv::Mat &left, const cv::Mat &rig
     StereoDetection det;
     m_detector->detect_stereo(left, right, det);
 
+    bool notify = false;
     {
         std::lock_guard<std::mutex> lock(m_frame_mutex);
         m_current_left = left;
         m_current_right = right;
         m_current_detection = det;
-        m_current_ts = ts;
         m_has_new_frame = true;
+        notify = !m_frame_dispatch_pending;
+        m_frame_dispatch_pending = true;
         m_last_frame_time = std::chrono::steady_clock::now();
         m_frame_is_stale = false;
     }
 
-    m_dispatcher.emit();
+    if (notify) m_dispatcher.emit();
 }
 
 void CalibrationWindow::on_frame_dispatched() {
-    if (m_is_calibrating.load() || m_display_mode == DisplayMode::GRID_VALIDATION) {
+    {
+        std::lock_guard<std::mutex> lock(m_frame_mutex);
+        m_frame_dispatch_pending = false;
+    }
+    if (m_is_calibrating.load() || m_display_mode == DisplayMode::GRID_VALIDATION ||
+        m_display_mode == DisplayMode::LENS_DISTORTION) {
         return;
     }
 
     cv::Mat left_copy, right_copy;
     StereoDetection det_copy;
-    uint64_t ts = 0;
 
     {
         std::lock_guard<std::mutex> lock(m_frame_mutex);
@@ -574,10 +626,8 @@ void CalibrationWindow::on_frame_dispatched() {
         left_copy = m_current_left;
         right_copy = m_current_right;
         det_copy = m_current_detection;
-        ts = m_current_ts;
         m_has_new_frame = false;
     }
-    (void)ts;
 
     // Check connection status
     auto stats = m_receiver->get_stats();
@@ -601,10 +651,8 @@ void CalibrationWindow::on_frame_dispatched() {
         }
     }
 
-    // Decrement auto-capture cooldown
-    if (m_auto_capture_cooldown > 0) {
-        m_auto_capture_cooldown--;
-    }
+    // Decrement auto-capture cooldown.
+    if (m_auto_capture_cooldown > 0) --m_auto_capture_cooldown;
 
     // 1. Evaluate Detection & Guidance
     if (m_auto_capture_cooldown > 4) {
@@ -629,16 +677,14 @@ void CalibrationWindow::on_frame_dispatched() {
         m_still_frames_count = 0;
     } else {
         std::string novel_reason;
-        bool is_novel = m_coverage_tracker->is_novel_coverage(
-            det_copy.left_common_corners, det_copy.common_ids,
-            det_copy.object_points, left_copy.size(), &novel_reason);
+        bool is_novel = capture_is_useful(det_copy,left_copy.size(),novel_reason);
 
         if (is_novel) {
             m_still_frames_count++;
             m_big_status_label.set_markup("<span font_weight='bold' font_size='xx-large' foreground='#28a745'>STABLE — READY</span>");
             m_stationarity_badge.set_markup("<span foreground='#28a745'><b>Stationary (" + Glib::Markup::escape_text(novel_reason) + ")</b></span>");
 
-            // Auto-capture when stationary for >= 2 frames and cooled down
+            // Auto-capture when stationary for >= 2 frames and cooled down.
             if (m_auto_capture_enabled && m_still_frames_count >= 2 && m_auto_capture_cooldown <= 0) {
                 // Capture the same observation that passed the novelty check.
                 if (capture_frame(left_copy, right_copy, det_copy)) {
@@ -647,12 +693,18 @@ void CalibrationWindow::on_frame_dispatched() {
             }
         } else {
             m_still_frames_count = 0;
-            m_big_status_label.set_markup("<span font_weight='bold' font_size='xx-large' foreground='#17a2b8'>MOVE TARGET (Tilt or shift)</span>");
+            m_big_status_label.set_markup("<span font_weight='bold' font_size='xx-large' foreground='#17a2b8'>" + Glib::Markup::escape_text(novel_reason) + " — MOVE TARGET</span>");
             m_stationarity_badge.set_markup("<span foreground='#17a2b8'><b>Duplicate pose (Change angle/distance)</b></span>");
         }
     }
 
     m_corners_count_label.set_text("Stereo Corners: " + std::to_string(det_copy.common_ids.size()));
+
+    if (m_display_mode == DisplayMode::COVERAGE_HEATMAP) {
+        show_live_coverage(left_copy,right_copy,det_copy);
+        update_stats_ui();
+        return;
+    }
 
     // 2. Render Selected Display Mode
     cv::Mat display_img;
@@ -665,11 +717,6 @@ void CalibrationWindow::on_frame_dispatched() {
         cv::Mat rect_l, rect_r;
         StereoCalibrator::rectify_stereo(left_copy, right_copy, rect_l, rect_r, m_calib_result);
         display_img = StereoCalibrator::make_anaglyph(rect_l, rect_r);
-    } else if (m_display_mode == DisplayMode::COVERAGE_HEATMAP) {
-        cv::Mat l_heat = left_copy.clone();
-        m_coverage_tracker->draw_heatmap_overlay(l_heat, 0.45);
-        m_detector->draw_stereo_detection(l_heat, right_copy, det_copy);
-        cv::hconcat(l_heat, right_copy, display_img);
     } else { // LIVE_TRACKING
         cv::Mat l_annot = left_copy.clone();
         cv::Mat r_annot = right_copy.clone();
@@ -701,17 +748,15 @@ bool CalibrationWindow::capture_frame(const cv::Mat &l, const cv::Mat &r,
                                       const StereoDetection &det) {
     if (m_is_calibrating.load() || !det.is_stereo_valid) return false;
     std::string reason;
-    if (!m_coverage_tracker->is_novel_coverage(det.left_common_corners, det.common_ids,
-                                              det.object_points, l.size(), &reason)) {
+    if (!capture_is_useful(det,l.size(),reason)) {
         m_stationarity_badge.set_text(reason);
+        m_big_status_label.set_text(reason + " — move target");
         return false;
     }
 
     int frame_id = m_calibrator->add_frame(l, r, det);
     if (frame_id > 0) {
-        m_coverage_tracker->add_frame(det.left_common_corners, det.common_ids,
-                                      det.object_points, l.size(),
-                                      det.left.rvec, det.left.pose_valid);
+        rebuild_coverage();
         m_still_frames_count = 0;
 
         // Add to TreeView
@@ -744,11 +789,7 @@ void CalibrationWindow::on_delete_frame_clicked() {
                                        std::to_string(m_calibrator->frame_count()) + "</span>");
 
         // Rebuild coverage tracker from retained frames
-        m_coverage_tracker->reset();
-        for (const auto &f : m_calibrator->get_frames()) {
-            m_coverage_tracker->add_frame(f.left_corners, f.charuco_ids, f.object_points,
-                                        f.left_image.size(), f.rvec, f.pose_valid);
-        }
+        rebuild_coverage();
 
         // Frame collection changed: disable outlier filtering until recalibrated
         m_filter_outliers_button.set_sensitive(false);
@@ -759,8 +800,12 @@ void CalibrationWindow::on_delete_frame_clicked() {
 }
 
 void CalibrationWindow::on_clear_frames_clicked() {
+    m_outlier_report_label.set_text("");
+    m_outlier_report_label.set_tooltip_text("");
+    m_nested_dirty = true;
     m_still_frames_count = 0;
     m_auto_capture_cooldown = 0;
+    m_corner_sample_id = -1;
     m_calibrator->clear_frames();
     m_coverage_tracker->reset();
     m_frames_list_store->clear();
@@ -769,13 +814,14 @@ void CalibrationWindow::on_clear_frames_clicked() {
     m_calib_result = StereoCalibrationResult();
     m_calibrated_frames.clear();
     m_pending_calibration_frames.clear();
-    m_rms_label.set_markup("RMS Reprojection Error: <b>--</b>");
+    m_rms_label.set_markup("Stereo optimization RMS: <b>--</b>");
     m_baseline_label.set_markup("Baseline: <b>--</b>");
     m_epipolar_err_label.set_markup("Vertical Disparity Error: <b>--</b>");
     m_save_button.set_sensitive(false);
     m_filter_outliers_button.set_sensitive(false);
     if (m_display_mode_combo.get_active_id() == "rectified" ||
         m_display_mode_combo.get_active_id() == "anaglyph" ||
+        m_display_mode_combo.get_active_id() == "distortion" ||
         m_display_mode_combo.get_active_id() == "validation") {
         m_display_mode_combo.set_active_id("heatmap");
     }
@@ -842,9 +888,8 @@ void CalibrationWindow::on_archive_loaded() {
             row[m_frame_cols.col_corners] = static_cast<int>(frame.charuco_ids.size());
             row[m_frame_cols.col_error] = "--";
             row[m_frame_cols.col_error_value] = std::numeric_limits<double>::infinity();
-            m_coverage_tracker->add_frame(frame.left_corners, frame.charuco_ids, frame.object_points,
-                                         frame.left_image.size(), frame.rvec, frame.pose_valid);
         }
+        rebuild_coverage();
         m_auto_capture_check.set_active(false);
         {
             std::lock_guard<std::mutex> lock(m_frame_mutex);
@@ -976,18 +1021,47 @@ void CalibrationWindow::on_calib_finished_dispatched() {
         err_msg = m_calib_done_error;
     }
 
+    bool filter_rolled_back=false;
+    if (m_filter_backup) {
+        if (!ok) {
+            *m_calibrator=std::move(*m_filter_backup);
+            filter_rolled_back=true;
+            m_outlier_report_label.set_text("Last filter rolled back: recalibration failed. Original samples and corners restored.");
+            m_updating_validation=true;
+            m_frames_list_store->clear();
+            for (const auto &frame:m_calibrator->get_frames()) {
+                auto row=*(m_frames_list_store->append());
+                row[m_frame_cols.col_id]=frame.id;
+                row[m_frame_cols.col_corners]=static_cast<int>(frame.charuco_ids.size());
+                const auto metric=m_calib_result.epipolar_rms_by_id.find(frame.id);
+                row[m_frame_cols.col_error_value]=metric==m_calib_result.epipolar_rms_by_id.end() ? std::numeric_limits<double>::infinity() : metric->second;
+                row[m_frame_cols.col_error]=metric==m_calib_result.epipolar_rms_by_id.end() ? "--" : std::to_string(metric->second);
+            }
+            for (auto it=m_frames_list_store->children().begin();it!=m_frames_list_store->children().end();++it)
+                if ((*it)[m_frame_cols.col_id]==m_filter_selected_sample) { m_frames_tree_view.get_selection()->select(it); break; }
+            m_updating_validation=false;
+            rebuild_coverage(); update_coverage_ui();
+            m_frames_count_label.set_text("Captured Frames: "+std::to_string(m_calibrator->frame_count()));
+            m_big_samples_label.set_markup("<span font_weight='bold' font_size='xx-large'>Samples: "+std::to_string(m_calibrator->frame_count())+"</span>");
+            m_save_button.set_sensitive(m_calib_result.success);
+        }
+        m_filter_backup.reset();
+    }
     if (!ok) m_pending_calibration_frames.clear();
     m_calibrate_button.set_sensitive(true);
     m_dist_model_combo.set_sensitive(true);
     m_rectification_alpha.set_sensitive(true);
     m_load_samples_button.set_sensitive(true);
-    m_capture_button.set_sensitive(true);
+    m_capture_button.set_sensitive(m_display_mode != DisplayMode::GRID_VALIDATION &&
+                                   m_display_mode != DisplayMode::LENS_DISTORTION);
     m_delete_frame_button.set_sensitive(true);
     m_clear_frames_button.set_sensitive(true);
-    m_filter_outliers_button.set_sensitive(ok && m_calibrator->frame_count() > 5);
+    m_filter_outliers_button.set_sensitive((ok || filter_rolled_back) && m_calibrator->frame_count() >= 5);
 
     if (ok) {
         m_calib_result = result;
+        rebuild_coverage();
+        update_coverage_ui();
         m_calibrated_frames = std::move(m_pending_calibration_frames);
         m_calib_progress_bar.set_fraction(1.0);
         m_calib_progress_bar.set_text("Calibration Complete (100%)");
@@ -998,11 +1072,12 @@ void CalibrationWindow::on_calib_finished_dispatched() {
         ss_base << std::fixed << std::setprecision(2) << m_calib_result.baseline_mm << " mm";
         ss_epi << std::fixed << std::setprecision(3) << m_calib_result.avg_epipolar_error_px << " px";
 
-        m_rms_label.set_markup("RMS Reprojection Error: <b><span foreground='#5cb85c'>" + ss_rms.str() + "</span></b>");
+        m_rms_label.set_markup("Stereo optimization RMS: <b><span foreground='#5cb85c'>" + ss_rms.str() + "</span></b>");
         m_baseline_label.set_markup("Baseline: <b>" + ss_base.str() + "</b>");
         m_epipolar_err_label.set_markup("Vertical Disparity Error: <b>" + ss_epi.str() + "</b>");
 
-        // Update TreeView per-frame errors by unique frame ID
+        // Update errors without letting row reordering change the selected view.
+        m_updating_validation = true;
         int sort_column;
         Gtk::SortType sort_order;
         m_frames_list_store->get_sort_column_id(sort_column, sort_order);
@@ -1010,8 +1085,8 @@ void CalibrationWindow::on_calib_finished_dispatched() {
         auto children = m_frames_list_store->children();
         for (auto it = children.begin(); it != children.end(); ++it) {
             int id = (*it)[m_frame_cols.col_id];
-            auto err_it = m_calib_result.per_frame_error_by_id.find(id);
-            if (err_it != m_calib_result.per_frame_error_by_id.end()) {
+            auto err_it = m_calib_result.epipolar_rms_by_id.find(id);
+            if (err_it != m_calib_result.epipolar_rms_by_id.end()) {
                 std::ostringstream ss;
                 ss << std::fixed << std::setprecision(2) << err_it->second;
                 (*it)[m_frame_cols.col_error] = ss.str();
@@ -1020,8 +1095,9 @@ void CalibrationWindow::on_calib_finished_dispatched() {
         }
 
         m_frames_list_store->set_sort_column(sort_column, sort_order);
+        m_updating_validation = false;
         m_save_button.set_sensitive(true);
-        m_display_mode_combo.set_active_id("rectified");
+        on_display_mode_changed(); // Refresh the existing view using the new calibration.
     } else {
         m_calib_progress_bar.set_fraction(0.0);
         m_calib_progress_bar.set_text("Calibration Failed");
@@ -1031,111 +1107,48 @@ void CalibrationWindow::on_calib_finished_dispatched() {
                                   Gtk::MESSAGE_ERROR, Gtk::BUTTONS_OK);
         dialog.set_secondary_text(err_msg);
         dialog.run();
+        if (filter_rolled_back) on_display_mode_changed();
     }
 }
 
 void CalibrationWindow::on_filter_outliers_clicked() {
-    if (m_is_calibrating.load()) return;
-    if (!m_calib_result.success || m_calib_result.per_frame_rms.empty()) {
-        return;
-    }
-
-    const auto &frames = m_calibrator->get_frames();
-    if (frames.size() <= 5) {
-        Gtk::MessageDialog dialog(*this, "Cannot Filter Outliers", false,
-                                  Gtk::MESSAGE_INFO, Gtk::BUTTONS_OK);
-        dialog.set_secondary_text("A minimum of 5 frames is required for calibration. Current collection has " +
-                                  std::to_string(frames.size()) + " frames.");
+    if (m_is_calibrating.load() || !m_calib_result.success) return;
+    m_filter_selected_sample=-1;
+    if (auto selected=m_frames_tree_view.get_selection()->get_selected()) m_filter_selected_sample=(*selected)[m_frame_cols.col_id];
+    m_filter_backup=std::make_unique<StereoCalibrator>(*m_calibrator);
+    const auto report=m_calibrator->filter_outliers(m_calib_result,m_density_target.get_value_as_int());
+    m_outlier_report_label.set_text("Last filter: " + report.summary());
+    std::ostringstream audit;
+    for (const auto &decision:report.decisions) audit << decision << '\n';
+    m_outlier_report_label.set_tooltip_text(audit.str());
+    if (!report.removed_samples && !report.removed_corners) {
+        m_filter_backup.reset();
+        Gtk::MessageDialog dialog(*this,"No automatic removals",false,Gtk::MESSAGE_INFO,Gtk::BUTTONS_OK);
+        dialog.set_secondary_text(report.summary()+"\n\n"+audit.str());
         dialog.run();
         return;
     }
-
-    // Collect errors of currently retained frames using unique frame ID
-    std::vector<double> current_frame_errors;
-    std::vector<std::pair<double, int>> frame_error_pairs; // (error, frame_id)
-    for (const auto &frame : frames) {
-        auto it = m_calib_result.per_frame_error_by_id.find(frame.id);
-        if (it != m_calib_result.per_frame_error_by_id.end()) {
-            current_frame_errors.push_back(it->second);
-            frame_error_pairs.emplace_back(it->second, frame.id);
-        }
+    // Update retained IDs and counts without switching the selected display mode.
+    m_updating_validation=true;
+    int sort_column;
+    Gtk::SortType sort_order;
+    m_frames_list_store->get_sort_column_id(sort_column,sort_order);
+    m_frames_list_store->set_sort_column(Gtk::TreeSortable::DEFAULT_UNSORTED_COLUMN_ID,Gtk::SORT_ASCENDING);
+    auto children=m_frames_list_store->children();
+    for (auto it=children.begin();it!=children.end();) {
+        const int id=(*it)[m_frame_cols.col_id];
+        const auto &frames=m_calibrator->get_frames();
+        auto frame=std::find_if(frames.begin(),frames.end(),[id](const auto &f) { return f.id==id; });
+        if (frame==frames.end()) it=m_frames_list_store->erase(it);
+        else { (*it)[m_frame_cols.col_corners]=static_cast<int>(frame->charuco_ids.size()); ++it; }
     }
-
-    if (current_frame_errors.size() <= 5) {
-        Gtk::MessageDialog dialog(*this, "Cannot Filter Outliers", false,
-                                  Gtk::MESSAGE_INFO, Gtk::BUTTONS_OK);
-        dialog.set_secondary_text("Fewer than 5 calibrated frames available.");
-        dialog.run();
-        return;
-    }
-
-    // Compute median reprojection error across currently evaluated frames
-    std::vector<double> sorted_errors = current_frame_errors;
-    std::sort(sorted_errors.begin(), sorted_errors.end());
-    size_t n = sorted_errors.size();
-    double median_err = (n % 2 == 1)
-        ? sorted_errors[n / 2]
-        : 0.5 * (sorted_errors[n / 2 - 1] + sorted_errors[n / 2]);
-
-    double threshold = 1.5 * median_err;
-
-    // Identify candidate outliers exceeding 1.5x median error
-    std::vector<std::pair<double, int>> candidate_outliers; // (error, frame_id)
-    for (const auto &pair : frame_error_pairs) {
-        if (pair.first > threshold) {
-            candidate_outliers.push_back(pair);
-        }
-    }
-
-    if (candidate_outliers.empty()) {
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(3)
-           << "Median error: " << median_err << " px\n"
-           << "Cutoff threshold (1.5x): " << threshold << " px\n\n"
-           << "All " << frames.size() << " frames are consistent with low reprojection error.";
-        Gtk::MessageDialog dialog(*this, "No Outliers Detected", false,
-                                  Gtk::MESSAGE_INFO, Gtk::BUTTONS_OK);
-        dialog.set_secondary_text(ss.str());
-        dialog.run();
-        return;
-    }
-
-    // Safety: ensure dropping outliers never leaves fewer than 5 frames
-    std::sort(candidate_outliers.rbegin(), candidate_outliers.rend()); // Highest error first
-    size_t max_allowed_drops = frames.size() - 5;
-    size_t num_to_drop = std::min(candidate_outliers.size(), max_allowed_drops);
-
-    std::vector<int> dropped_ids;
-    for (size_t i = 0; i < num_to_drop; ++i) {
-        dropped_ids.push_back(candidate_outliers[i].second);
-    }
-
-    // Remove dropped frames from StereoCalibrator and TreeView
-    for (int id : dropped_ids) {
-        m_calibrator->remove_frame(id);
-
-        auto children = m_frames_list_store->children();
-        for (auto it = children.begin(); it != children.end(); ++it) {
-            if ((*it)[m_frame_cols.col_id] == id) {
-                m_frames_list_store->erase(it);
-                break;
-            }
-        }
-    }
-
-    // Rebuild coverage tracker from retained frames
-    m_coverage_tracker->reset();
-    for (const auto &f : m_calibrator->get_frames()) {
-        m_coverage_tracker->add_frame(f.left_corners, f.charuco_ids, f.object_points,
-                                        f.left_image.size(), f.rvec, f.pose_valid);
-    }
-
-    m_frames_count_label.set_text("Captured Frames: " + std::to_string(m_calibrator->frame_count()));
-    m_big_samples_label.set_markup("<span font_weight='bold' font_size='xx-large'>Samples: " +
-                                   std::to_string(m_calibrator->frame_count()) + "</span>");
+    m_frames_list_store->set_sort_column(sort_column,sort_order);
+    m_updating_validation=false;
+    m_corner_sample_id=-1;
+    rebuild_coverage();
     update_coverage_ui();
-
-    // Automatically trigger recalibration with the clean dataset
+    m_frames_count_label.set_text("Captured Frames: "+std::to_string(m_calibrator->frame_count()));
+    m_big_samples_label.set_markup("<span font_weight='bold' font_size='xx-large'>Samples: "+std::to_string(m_calibrator->frame_count())+"</span>");
     on_calibrate_clicked();
 }
 
@@ -1184,16 +1197,25 @@ void CalibrationWindow::on_save_clicked() {
 
 void CalibrationWindow::on_display_mode_changed() {
     std::string id = m_display_mode_combo.get_active_id();
-    m_video_area.set_navigation_enabled(id == "validation");
-    m_capture_button.set_sensitive(!m_is_calibrating.load() && id != "validation");
+    m_validation_label.set_visible(id != "heatmap");
+    m_video_area.set_navigation_enabled(id == "validation" || id == "heatmap" || id == "distortion");
+    m_video_area.set_hover_enabled(id == "heatmap");
+    m_capture_button.set_sensitive(!m_is_calibrating.load() && id != "validation" && id != "distortion");
+    m_projection_mode_combo.set_sensitive(id == "validation");
+    m_corner_combo.set_sensitive(id == "validation");
+    m_residual_scale.set_sensitive(id == "validation");
     if (id != "validation")
         m_validation_label.set_text("After calibration, click a sample to validate its grid.");
     if (id == "validation") {
         m_display_mode = DisplayMode::GRID_VALIDATION;
-        m_video_area.set_active_epipolar_y(-1);
         show_selected_grid();
+    } else if (id == "distortion") {
+        m_display_mode = DisplayMode::LENS_DISTORTION;
+        m_still_frames_count = 0;
+        show_lens_distortion();
     } else if (id == "heatmap") {
         m_display_mode = DisplayMode::COVERAGE_HEATMAP;
+        show_coverage_view();
     } else if (id == "rectified") {
         m_display_mode = DisplayMode::RECTIFIED_EPIPOLAR;
     } else if (id == "anaglyph") {
@@ -1201,6 +1223,31 @@ void CalibrationWindow::on_display_mode_changed() {
     } else {
         m_display_mode = DisplayMode::LIVE_TRACKING;
     }
+}
+
+void CalibrationWindow::show_lens_distortion() {
+    if (m_is_calibrating.load()) return;
+    LensDistortionView view;
+    std::string error;
+    if (render_lens_distortion(m_calib_result, view, error)) {
+        m_video_area.set_image(view.image);
+        std::ostringstream description;
+        description << "Lens distortion only: gray = ideal grid; colored = distorted grid."
+                    << "\nArrows: ideal -> distorted sensor pixels, at actual displacement."
+                    << "\nSame color scale in both eyes: green = 0, yellow = half, red = "
+                    << std::fixed << std::setprecision(2) << view.color_max_px << " px."
+                    << "\nStereo alignment and rectification crop are excluded."
+                    << "\nThe grid describes the fitted model, not calibration accuracy."
+                    << "\nWheel: zoom. Left drag: pan. Double-click: fit.";
+        if (view.invalid_pixels[0] || view.invalid_pixels[1])
+            description << "\nWarning: undefined or unrenderable pixels skipped: L "
+                        << view.invalid_pixels[0] << ", R " << view.invalid_pixels[1] << ".";
+        m_validation_label.set_text(description.str());
+    } else {
+        m_video_area.set_image(cv::Mat(360, 1280, CV_8UC3, cv::Scalar(22, 22, 22)));
+        m_validation_label.set_text("Lens distortion unavailable: " + error);
+    }
+    m_big_status_label.set_text("LENS DISTORTION");
 }
 
 void CalibrationWindow::show_selected_grid() {
@@ -1228,32 +1275,216 @@ void CalibrationWindow::show_selected_grid() {
         cv::hconcat(it->left_image, it->right_image, display);
         m_validation_label.set_text("Sample #" + std::to_string(id) +
             " | Raw images. Run stereo calibration to display grid reprojection.");
-    } else if (StereoCalibrator::reproject_grid(*it, m_charuco_config, m_calib_result, projection, error)) {
-        cv::hconcat(projection.left_overlay, projection.right_overlay, display);
-        std::ostringstream ss;
-        ss << "Sample #" << id << " | RMS L: " << std::fixed << std::setprecision(3)
-           << projection.left_rms_px << " px, R: " << projection.right_rms_px
-           << " px\nGreen: projected grid. Yellow: detected corners. Red: residuals."
-           << "\nPose fitted in left eye; right uses stereo R/T."
-           << "\nWheel: zoom. Left drag: pan. Double-click: fit.";
-        m_validation_label.set_text(ss.str());
     } else {
-        cv::hconcat(it->left_image, it->right_image, display);
-        m_validation_label.set_text(error);
+        // Recompute from the current sample and calibration: no stale diagnostic cache.
+        const auto diagnostics = StereoCalibrator::diagnose_sample(*it, m_calib_result);
+        const auto mode_id = m_projection_mode_combo.get_active_id();
+        const auto mode = mode_id == "independent" ? ProjectionMode::INDEPENDENT :
+                          mode_id == "right" ? ProjectionMode::RIGHT_TO_LEFT : ProjectionMode::LEFT_TO_RIGHT;
+        const auto &left = mode == ProjectionMode::RIGHT_TO_LEFT ? diagnostics.right_to_left : diagnostics.left_fit;
+        const auto &right = mode == ProjectionMode::LEFT_TO_RIGHT ? diagnostics.left_to_right : diagnostics.right_fit;
+        if (m_corner_sample_id != id) {
+            m_updating_validation = true;
+            m_corner_combo.remove_all();
+            m_corner_combo.append("none", "Corner details: select ID");
+            for (int corner_id : it->charuco_ids)
+                m_corner_combo.append(std::to_string(corner_id), "Corner #" + std::to_string(corner_id));
+            m_corner_combo.set_active_id("none");
+            m_corner_sample_id = id;
+            m_updating_validation = false;
+        }
+        const auto corner_id = m_corner_combo.get_active_id();
+        const int selected_corner = corner_id.empty() || corner_id == "none" ? -1 : std::stoi(corner_id);
+        const double threshold = m_residual_scale.get_value();
+        const bool rendered = StereoCalibrator::render_grid(*it, m_charuco_config, m_calib_result,
+            diagnostics, mode, threshold, selected_corner, projection, error);
+        if (rendered) cv::hconcat(projection.left_overlay, projection.right_overlay, display);
+        else cv::hconcat(it->left_image, it->right_image, display);
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(3) << "Sample #" << id;
+        auto metric = [&](const char *name, const ProjectionDiagnostics &d) {
+            ss << "\n" << name << ": ";
+            if (d.valid) ss << d.rms_px << " px";
+            else ss << "unavailable (" << d.reason << ")";
+        };
+        metric("Independent L RMS", diagnostics.left_fit);
+        metric("Independent R RMS", diagnostics.right_fit);
+        metric("L -> R prediction RMS", diagnostics.left_to_right);
+        metric("R -> L prediction RMS", diagnostics.right_to_left);
+        ss << "\nVertical epipolar RMS: ";
+        if (std::isfinite(diagnostics.epipolar_rms_px)) ss << diagnostics.epipolar_rms_px << " px";
+        else ss << "unavailable (" << diagnostics.epipolar_reason << ")";
+        auto details = [&](const char *eye, const ProjectionDiagnostics &d) {
+            if (!d.valid) return;
+            const auto above = std::count_if(d.corners.begin(), d.corners.end(),
+                [threshold](const auto &c) { return c.magnitude_px > threshold; });
+            ss << "\nDisplayed " << eye << ": " << above << "/" << d.corners.size() << " corners > " << threshold << " px";
+            for (const auto &c : d.corners) if (c.id == selected_corner)
+                ss << "\n" << eye << " #" << c.id << ": dx " << c.delta.x << ", dy " << c.delta.y
+                   << ", magnitude " << c.magnitude_px << " px";
+        };
+        details("L", left); details("R", right);
+        ss << "\nGreen = 0 px; yellow = midscale; red >= " << threshold << " px. Arrows: detected -> projected.";
+        ss << "\nDim grid: prediction. White ring: selected corner.\nWheel: zoom. Left drag: pan. Double-click: fit.";
+        if (!rendered) ss << "\nOverlay unavailable: " << error;
+        m_validation_label.set_text(ss.str());
     }
+    m_projection_mode_combo.set_sensitive(m_calib_result.success);
+    m_residual_scale.set_sensitive(m_calib_result.success);
+    m_corner_combo.set_sensitive(m_calib_result.success);
     m_video_area.set_image(display);
     m_big_status_label.set_markup("<span font_weight='bold' font_size='xx-large' foreground='#007bff'>VALIDATING SAMPLE #" +
                                   std::to_string(id) + "</span>");
 }
 
+void CalibrationWindow::rebuild_coverage() {
+    m_nested_dirty = true;
+    m_coverage_tracker->reset();
+    for (const auto &frame : m_calibrator->get_frames()) {
+        auto model = m_calib_result;
+        if (!model.success) {
+            const auto size = frame.left_image.size();
+            const double focal = std::max(size.width,size.height);
+            model.success = true; model.image_size = size;
+            model.K1 = model.K2 = (cv::Mat_<double>(3,3) << focal,0,size.width/2.0,0,focal,size.height/2.0,0,0,1);
+            model.D1 = model.D2 = cv::Mat::zeros(1,5,CV_64F);
+            model.R = cv::Mat::eye(3,3,CV_64F); model.T = cv::Mat::zeros(3,1,CV_64F);
+        }
+        const auto diagnostics = StereoCalibrator::diagnose_sample(frame,model);
+        const auto &pose = diagnostics.left_fit;
+        const auto &right = diagnostics.right_fit;
+        m_coverage_tracker->add_frame(frame.left_corners, frame.charuco_ids, frame.object_points,
+            frame.left_image.size(), pose.rvec, pose.valid, frame.id,
+            frame.right_corners, pose.tvec, pose.valid,
+            {right.rvec,right.tvec,right.valid});
+    }
+}
+
+std::array<CoveragePose,2> CalibrationWindow::current_coverage_poses(const StereoDetection &detection) const {
+    std::array<CoveragePose,2> poses{{
+        {detection.left.rvec,detection.left.tvec,detection.left.pose_valid},
+        {detection.right.rvec,detection.right.tvec,detection.right.pose_valid}}};
+    if (!m_calib_result.success) return poses;
+    for (int eye=0;eye<2;++eye) {
+        poses[eye].valid=false;
+        const auto &points=eye ? detection.right_common_corners : detection.left_common_corners;
+        if (points.size()<6 || points.size()!=detection.object_points.size()) continue;
+        try {
+            poses[eye].valid=cv::solvePnP(detection.object_points,points,
+                eye ? m_calib_result.K2 : m_calib_result.K1,
+                eye ? m_calib_result.D2 : m_calib_result.D1,poses[eye].rvec,poses[eye].tvec);
+            poses[eye].valid &= cv::checkRange(cv::Mat(poses[eye].rvec)) &&
+                cv::checkRange(cv::Mat(poses[eye].tvec)) && poses[eye].tvec[2]>0;
+        } catch (const cv::Exception &) { poses[eye].valid=false; }
+    }
+    return poses;
+}
+
+bool CalibrationWindow::capture_is_useful(const StereoDetection &detection,cv::Size size,std::string &reason) {
+    // Novel observations keep the existing fast path. Similar ones need density and noise checks.
+    if (m_coverage_tracker->is_novel_coverage(detection.left_common_corners,detection.common_ids,
+                                             detection.object_points,size,&reason)) return true;
+    const auto poses=current_coverage_poses(detection);
+    return m_coverage_tracker->is_useful_capture(detection.left_common_corners,detection.right_common_corners,
+        detection.common_ids,detection.object_points,size,poses[0],poses[1],m_density_target.get_value_as_int(),&reason);
+}
+
+void CalibrationWindow::refresh_nested_data() {
+    if (!m_nested_dirty) return;
+    m_nested_data = m_coverage_tracker->nested_coverage(false,m_density_target.get_value_as_int());
+    m_nested_right_data = m_coverage_tracker->nested_coverage(true,m_density_target.get_value_as_int());
+    m_nested_dirty = false;
+    m_overlay_dirty = true;
+}
+
+void CalibrationWindow::show_live_coverage(const cv::Mat &left, const cv::Mat &right,
+                                           const StereoDetection &detection) {
+    refresh_nested_data();
+    if (m_overlay_dirty || m_overlay_left.image.size() != left.size() || m_overlay_right.image.size() != right.size()) {
+        m_overlay_left = CoverageTracker::draw_nested_overlay(cv::Mat::zeros(left.size(),CV_8UC3),m_nested_data,false,1.0);
+        m_overlay_right = CoverageTracker::draw_nested_overlay(cv::Mat::zeros(right.size(),CV_8UC3),m_nested_right_data,true,1.0);
+        auto prepare = [](NestedCoverageChart &ink) {
+            cv::Mat alpha8;
+            ink.opacity.convertTo(alpha8,CV_8UC1,255*NestedCoverageData::overlay_opacity);
+            cv::Mat retention = 255-alpha8;
+            std::vector<cv::Mat> channels(3,retention);
+            cv::Mat rgb_retention; cv::merge(channels,rgb_retention);
+            // Keep the cached red/green gradient; opacity stays constant in each band.
+            ink.image.convertTo(ink.image,CV_8UC3,NestedCoverageData::overlay_opacity);
+            return rgb_retention;
+        };
+        m_overlay_left_retention = prepare(m_overlay_left);
+        m_overlay_right_retention = prepare(m_overlay_right);
+        m_overlay_dirty = false;
+    }
+    m_live_stereo.create(left.rows,left.cols+right.cols,CV_8UC3);
+    auto compose = [](const cv::Mat &raw, const NestedCoverageChart &ink,
+                      const cv::Mat &retention, cv::Mat output) {
+        cv::multiply(raw,retention,output,1.0/255.0,CV_8UC3);
+        cv::add(output,ink.image,output);
+    };
+    cv::Mat left_output = m_live_stereo(cv::Rect(0,0,left.cols,left.rows));
+    cv::Mat right_output = m_live_stereo(cv::Rect(left.cols,0,right.cols,right.rows));
+    compose(left,m_overlay_left,m_overlay_left_retention,left_output);
+    compose(right,m_overlay_right,m_overlay_right_retention,right_output);
+    const auto poses = current_coverage_poses(detection);
+    const auto &left_pose = poses[0]; const auto &right_pose = poses[1];
+    CoverageTracker::draw_live_coverage_tint(left_output,m_nested_data,m_overlay_left,detection.left_common_corners,
+                                            detection.object_points,left_pose);
+    CoverageTracker::draw_live_coverage_tint(right_output,m_nested_right_data,m_overlay_right,detection.right_common_corners,
+                                            detection.object_points,right_pose);
+    // Detection marks are drawn last so corners and the target stay readable.
+    m_detector->draw_stereo_detection(left_output,right_output,detection);
+    m_hover_tiles = m_overlay_left.tiles;
+    for (auto tile : m_overlay_right.tiles) {
+        tile.bounds.x += left.cols;
+        if (!tile.inner_bounds.empty()) tile.inner_bounds.x += left.cols;
+        m_hover_tiles.push_back(tile);
+    }
+    m_video_area.set_image(m_live_stereo);
+}
+
+void CalibrationWindow::show_coverage_view() {
+    if (m_display_mode != DisplayMode::COVERAGE_HEATMAP) return;
+    refresh_nested_data();
+    cv::Mat left, right;
+    StereoDetection detection;
+    {
+        std::lock_guard<std::mutex> lock(m_frame_mutex);
+        if (!m_frame_is_stale) {
+            left = m_current_left; right = m_current_right; detection = m_current_detection;
+        }
+    }
+    if (left.empty()) {
+        auto size = m_calibrator->expected_image_size();
+        if (size.empty()) size = {640,480};
+        left = right = cv::Mat(size,CV_8UC3,cv::Scalar(24,24,24));
+        cv::putText(left,"Waiting for live images...",{20,size.height/2},
+                    cv::FONT_HERSHEY_SIMPLEX,0.6,cv::Scalar(210,210,210),1,cv::LINE_AA);
+    }
+    show_live_coverage(left,right,detection);
+    m_video_area.set_hover_enabled(true);
+    m_big_status_label.set_text("5D COVERAGE");
+    m_validation_label.set_text("");
+    m_validation_label.hide();
+}
+
 void CalibrationWindow::update_coverage_ui() {
-    CoverageStats stats = m_coverage_tracker->get_stats();
-
-    m_big_spatial_progress.set_fraction(stats.spatial_coverage_ratio);
-    m_big_spatial_progress.set_text(std::to_string(static_cast<int>(stats.spatial_coverage_ratio * 100)) + "%");
-
-    m_big_tilt_progress.set_fraction(stats.tilt_coverage_ratio);
-    m_big_tilt_progress.set_text(std::to_string(static_cast<int>(stats.tilt_coverage_ratio * 100)) + "%");
+    refresh_nested_data();
+    const int target = m_density_target.get_value_as_int();
+    CoverageStats stats = m_coverage_tracker->get_stats(target);
+    m_big_spatial_progress.set_fraction((stats.spatial_coverage_ratio+stats.right_spatial_coverage_ratio)/2);
+    m_big_spatial_progress.set_text("L " + std::to_string(static_cast<int>(stats.spatial_coverage_ratio*100)) +
+        "% / R " + std::to_string(static_cast<int>(stats.right_spatial_coverage_ratio*100)) + "%");
+    m_big_spatial_progress.set_tooltip_text("Image X/Y cells seen in at least " + std::to_string(target) +
+        " retained images. Ignores depth and angles; not an accuracy score.");
+    const auto density = CoverageTracker::density_summary(m_nested_data,m_nested_right_data);
+    m_big_tilt_progress.set_fraction((density.left_fraction+density.right_fraction)/2);
+    m_big_tilt_progress.set_text("L " + std::to_string(static_cast<int>(density.left_fraction*100)) +
+        "% / R " + std::to_string(static_cast<int>(density.right_fraction*100)) + "%");
+    m_big_tilt_progress.set_tooltip_text("Progress toward target " + std::to_string(target) +
+        " across all displayed X/Y/Z and one frontal and four angled pan/tilt bins (frontal counted once). Excess observations in one bin cannot fill another. Not an accuracy score.");
+    show_coverage_view();
 }
 
 void CalibrationWindow::update_stats_ui() {
@@ -1289,9 +1520,7 @@ void CalibrationWindow::update_calib_status_ui() {
 bool CalibrationWindow::on_timer_tick() {
     update_stats_ui();
 
-    if (m_is_calibrating.load() || m_display_mode == DisplayMode::GRID_VALIDATION) {
-        return true;
-    }
+    if (m_is_calibrating.load()) return true;
 
     auto now = std::chrono::steady_clock::now();
     double time_since_frame;
@@ -1305,6 +1534,9 @@ bool CalibrationWindow::on_timer_tick() {
             m_current_detection = StereoDetection();
         }
     }
+
+    if (m_display_mode == DisplayMode::GRID_VALIDATION || m_display_mode == DisplayMode::COVERAGE_HEATMAP ||
+        m_display_mode == DisplayMode::LENS_DISTORTION) return true;
 
     // If stream has stopped producing frames (> 1.0 second since last frame)
     if (time_since_frame > 1.0) {

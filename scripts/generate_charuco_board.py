@@ -98,10 +98,12 @@ def generate_board_cairo(output_path: Path, squares_x: int, squares_y: int,
     board_w_mm = squares_x * square_mm
     board_h_mm = squares_y * square_mm
 
+    ruler_len_mm = 100.0  # 10 cm verification ruler
+
     if page_format in PAGE_SIZES_MM:
         page_w_mm, page_h_mm = PAGE_SIZES_MM[page_format]
     else:  # 'fit'
-        page_w_mm = board_w_mm + 2 * margin_mm
+        page_w_mm = max(board_w_mm, ruler_len_mm) + 2 * margin_mm
         page_h_mm = board_h_mm + 2 * margin_mm + 25.0  # extra for header & ruler
 
     page_w_pts = page_w_mm * MM_TO_PTS
@@ -196,12 +198,10 @@ def generate_board_cairo(output_path: Path, squares_x: int, squares_y: int,
     cr.show_text("IMPORTANT: Print at 100% scale (Do not fit/scale to page). Mount flat on rigid matte plate.")
     cr.restore()
 
-    # Draw Millimeter Verification Ruler
-    ruler_len = min(board_w_mm, 50.0)
-    if ruler_len < 30.0:
-        ruler_len = board_w_mm
+    # Draw 10 cm (100 mm) Millimeter Verification Ruler
+    ruler_x_mm = (page_w_mm - ruler_len_mm) / 2.0
     ruler_y = board_y_mm + board_h_mm + 12.0
-    draw_ruler(cr, board_x_mm, ruler_y, ruler_len)
+    draw_ruler(cr, ruler_x_mm, ruler_y, ruler_len_mm, label="100mm (10cm) Verification Ruler")
 
     if ext == ".png":
         surface.write_to_png(str(output_path))
@@ -213,29 +213,48 @@ def generate_board_cairo(output_path: Path, squares_x: int, squares_y: int,
 
 def main():
     parser = argparse.ArgumentParser(allow_abbrev=False, description="Generate millimeter-accurate ChArUco calibration board.")
-    parser.add_argument("-x", "--squares-x", type=int, default=8, help="Number of squares along X (default: 8)")
-    parser.add_argument("-y", "--squares-y", type=int, default=6, help="Number of squares along Y (default: 6)")
+    parser.add_argument("-x", "--squares-x", type=int, default=12, help="Number of squares along X (default: 12)")
+    parser.add_argument("-y", "--squares-y", type=int, default=12, help="Number of squares along Y (default: 12)")
     parser.add_argument("-s", "--square-length", type=float, default=5.0, help="Square side length in mm (default: 5.0)")
     parser.add_argument("-m", "--marker-length", type=float, default=3.5, help="Marker side length in mm (default: 3.5)")
-    parser.add_argument("-d", "--dict", choices=list(DICTIONARIES.keys()), default="DICT_4X4_50",
-                        help="ArUco dictionary (default: DICT_4X4_50)")
-    parser.add_argument("-p", "--page-size", choices=["a4", "letter", "fit"], default="a4",
-                        help="Page format (default: a4)")
+    parser.add_argument("-d", "--dict", choices=list(DICTIONARIES.keys()), default="DICT_4X4_100",
+                        help="ArUco dictionary (default: DICT_4X4_100)")
+    parser.add_argument("-p", "--page-size", choices=["letter", "a4", "fit"], default="letter",
+                        help="Page format (default: letter)")
     parser.add_argument("--margin", type=float, default=15.0, help="Page margins in mm for fit mode (default: 15.0)")
     parser.add_argument("--dpi", type=int, default=300, help="DPI for raster PNG output (default: 300)")
-    parser.add_argument("-o", "--output", type=str, default="charuco_board.pdf",
-                        help="Output file path (.pdf, .svg, or .png). Default: charuco_board.pdf")
+    parser.add_argument("-o", "--output", type=str, default=None,
+                        help="Output file path (.pdf, .svg, or .png). Default: charuco_<x>x<y>_s<s_mm>mm_<page>.pdf")
 
     args = parser.parse_args()
 
+    if args.squares_x < 2 or args.squares_y < 2:
+        parser.error("squares-x and squares-y must both be at least 2")
+    if args.square_length <= 0 or args.marker_length <= 0:
+        parser.error("square-length and marker-length must be positive")
     if args.marker_length >= args.square_length:
         parser.error(f"Marker length ({args.marker_length} mm) must be strictly less than square length ({args.square_length} mm)")
+
+    markers_needed = (args.squares_x * args.squares_y) // 2
+    try:
+        dict_capacity = int(args.dict.split("_")[-1])
+        if markers_needed > dict_capacity:
+            parser.error(
+                f"Board {args.squares_x}x{args.squares_y} requires {markers_needed} markers, but {args.dict} only provides {dict_capacity}. "
+                f"Please select a larger dictionary (e.g. DICT_4X4_100 or DICT_4X4_250)."
+            )
+    except ValueError:
+        pass
 
     if cairo is None:
         print("Error: pycairo is required. Install with: sudo apt install python3-cairo")
         sys.exit(1)
 
-    out_path = Path(args.output).resolve()
+    if args.output is None:
+        out_name = f"charuco_{args.squares_x}x{args.squares_y}_s{args.square_length:.1f}mm_{args.page_size}.pdf"
+        out_path = Path(out_name).resolve()
+    else:
+        out_path = Path(args.output).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     generate_board_cairo(
