@@ -132,7 +132,7 @@ def build_src(abstract_name: str, width: int = 0, height: int = 0,
     return s
 
 
-def build_input(gst_input: str, default_role: str, width: int = 0,
+def build_input(gst_input: str, default_role: str = "", width: int = 0,
                 height: int = 0, fmt: str = "I420") -> str:
     """Return a pipeline unchanged, or expand an @ socket reference to unixfdsrc."""
     if not is_socket_reference(gst_input):

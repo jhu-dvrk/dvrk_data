@@ -162,7 +162,8 @@ def main():
     path = Path(args.config)
     try:
         config = load_color_file(path)
-        capture = open_capture("side-by-side stereo", sockets.build_input(args.input))
+        capture = open_capture("side-by-side stereo",
+                               sockets.build_input(args.input, sockets.ROLE_STEREO_SOURCE))
         ok, frame = capture.read()
         if not ok or frame is None or frame.shape[1] < 2 or frame.shape[1] % 2:
             capture.release()

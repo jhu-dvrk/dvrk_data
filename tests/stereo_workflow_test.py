@@ -51,6 +51,18 @@ class WorkflowTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 save_color_file(path, dict(left, contrast=3), NEUTRAL_COLOR)
 
+    def test_build_input_socket(self):
+        from dvrk_data import dvrk_gst_socket
+        self.assertEqual(dvrk_gst_socket.build_input("videotestsrc"), "videotestsrc")
+        self.assertEqual(
+            dvrk_gst_socket.build_input("@dvrk:stereo_source:stereo"),
+            "unixfdsrc socket-path=dvrk:stereo_source:stereo socket-type=abstract do-timestamp=true"
+        )
+        self.assertEqual(
+            dvrk_gst_socket.build_input("@dvrk:stereo_source:stereo", dvrk_gst_socket.ROLE_STEREO_SOURCE, 640, 480),
+            "unixfdsrc socket-path=dvrk:stereo_source:stereo socket-type=abstract do-timestamp=true ! video/x-raw,format=I420,width=640,height=480"
+        )
+
     def test_alignment_saves_only_geometry(self):
         functions = runpy.run_path(str(ROOT / "scripts" / "stereo_alignment_calibration"), run_name="alignment_calibration_test")
         config = {"camera": {"left": {"color": {"brightness": 0.1}},

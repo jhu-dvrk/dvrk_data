@@ -132,7 +132,7 @@ inline std::string build_src(const std::string &abstract_name,
 
 /// Return a plain pipeline unchanged, or expand an @ socket reference to src.
 inline std::string build_input(const std::string &gst_input,
-                               const std::string &default_role,
+                               const std::string &default_role = {},
                                int width = 0, int height = 0,
                                const std::string &format = "I420") {
     if (!is_socket_reference(gst_input)) return gst_input;
