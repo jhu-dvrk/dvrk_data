@@ -92,12 +92,6 @@ void CharucoDetector::draw_board(cv::Size out_size, cv::OutputArray img, int mar
 #endif
 }
 
-#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
-#define DVRK_BOARD_REF (*m_board)
-#else
-#define DVRK_BOARD_REF (m_board)
-#endif
-
 bool CharucoDetector::detect_mono(const cv::Mat &image,
                                  MonoDetection &out,
                                  const cv::Mat &camera_matrix,
@@ -128,17 +122,17 @@ bool CharucoDetector::detect_mono(const cv::Mat &image,
     }
 
     // Refine rejected markers using board layout
-    cv::aruco::refineDetectedMarkers(gray, DVRK_BOARD_REF, out.marker_corners, out.marker_ids, rejected);
+    cv::aruco::refineDetectedMarkers(gray, m_board, out.marker_corners, out.marker_ids, rejected);
 
     // Interpolate ChArUco corners
     int n_corners = 0;
     if (!camera_matrix.empty() && !dist_coeffs.empty()) {
         n_corners = cv::aruco::interpolateCornersCharuco(
-            out.marker_corners, out.marker_ids, gray, DVRK_BOARD_REF,
+            out.marker_corners, out.marker_ids, gray, m_board,
             out.charuco_corners, out.charuco_ids, camera_matrix, dist_coeffs);
     } else {
         n_corners = cv::aruco::interpolateCornersCharuco(
-            out.marker_corners, out.marker_ids, gray, DVRK_BOARD_REF,
+            out.marker_corners, out.marker_ids, gray, m_board,
             out.charuco_corners, out.charuco_ids);
     }
 
@@ -147,7 +141,7 @@ bool CharucoDetector::detect_mono(const cv::Mat &image,
 
         if (!camera_matrix.empty() && !dist_coeffs.empty()) {
             out.pose_valid = cv::aruco::estimatePoseCharucoBoard(
-                out.charuco_corners, out.charuco_ids, DVRK_BOARD_REF,
+                out.charuco_corners, out.charuco_ids, m_board,
                 camera_matrix, dist_coeffs, out.rvec, out.tvec);
         } else if (out.charuco_corners.size() >= 6) {
             // Uncalibrated stream: estimate board pose using canonical pinhole approximation
@@ -160,7 +154,7 @@ bool CharucoDetector::detect_mono(const cv::Mat &image,
             cv::Mat D_approx = cv::Mat::zeros(1, 5, CV_64F);
             try {
                 out.pose_valid = cv::aruco::estimatePoseCharucoBoard(
-                    out.charuco_corners, out.charuco_ids, DVRK_BOARD_REF,
+                    out.charuco_corners, out.charuco_ids, m_board,
                     K_approx, D_approx, out.rvec, out.tvec);
             } catch (...) {
                 out.pose_valid = false;
