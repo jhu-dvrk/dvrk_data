@@ -77,6 +77,9 @@ public:
       error = "Missing latest-video appsrc: " + m_spec.name;
       return false;
     }
+    if (m_spec.stage == OutputStage::Preserve) {
+      g_object_set(m_output, "do-timestamp", FALSE, nullptr);
+    }
     for (auto &input : m_inputs) {
       const auto &spec = m_spec.inputs[input.index];
       if (spec.width <= 0 || spec.height <= 0 || spec.x < 0 || spec.y < 0 ||
@@ -321,6 +324,8 @@ private:
     DcFrameTimestamps timestamps;
     bool common_set = false;
     unsigned selected_eyes = 0;
+    GstClockTime camera_pts = GST_CLOCK_TIME_NONE;
+    GstClockTime camera_duration = GST_CLOCK_TIME_NONE;
     for (size_t i = 0; i < samples.size(); ++i) {
       if (!samples[i].sample) continue;
       auto &input = m_inputs[i];
@@ -342,6 +347,11 @@ private:
       }
       const auto camera = m_spec.inputs[i].camera;
       if (camera == CameraContent::None) continue;
+      if (GST_CLOCK_TIME_IS_VALID(GST_BUFFER_PTS(frame_buffer)) &&
+          (!GST_CLOCK_TIME_IS_VALID(camera_pts) || GST_BUFFER_PTS(frame_buffer) > camera_pts)) {
+        camera_pts = GST_BUFFER_PTS(frame_buffer);
+        camera_duration = GST_BUFFER_DURATION(frame_buffer);
+      }
       const auto selected = dc_buffer_get_frame_timestamps(frame_buffer);
       selected_eyes |= camera == CameraContent::Left ? 1 : camera == CameraContent::Right ? 2 : 3;
       if (camera == CameraContent::Stereo) {
@@ -385,9 +395,15 @@ private:
       timestamps.stereo_output_ts = timestamps.alignment_output_ts;
     }
     dc_buffer_set_frame_timestamps(buffer, timestamps);
-    GST_BUFFER_PTS(buffer) = GST_CLOCK_TIME_NONE;
+    GST_BUFFER_PTS(buffer) =
+        (m_spec.stage == OutputStage::Preserve && selected_eyes != 0)
+            ? camera_pts
+            : GST_CLOCK_TIME_NONE;
     GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
-    GST_BUFFER_DURATION(buffer) = GST_CLOCK_TIME_NONE;
+    GST_BUFFER_DURATION(buffer) =
+        (m_spec.stage == OutputStage::Preserve && selected_eyes != 0)
+            ? camera_duration
+            : GST_CLOCK_TIME_NONE;
     gst_app_src_push_buffer(GST_APP_SRC(m_output), pending.release());
   }
 

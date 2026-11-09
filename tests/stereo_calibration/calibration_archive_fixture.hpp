@@ -21,7 +21,7 @@ struct CalibrationArchiveFixture {
             std::ofstream(root / name) << "unused by raw image reload\n";
         dvrk_data::calibration::CharucoDetector detector(board);
         cv::Mat gray;
-        detector.get_board()->draw({640, 480}, gray, 24);
+        detector.draw_board({640, 480}, gray, 24);
         cv::cvtColor(gray, image, cv::COLOR_GRAY2BGR);
         std::vector<dvrk_data::calibration::CalibrationFrame> frames(2);
         frames[0].id = 2; frames[1].id = 10;

@@ -16,6 +16,16 @@ CharucoDetector::CharucoDetector(const CharucoConfig &config)
 }
 
 void CharucoDetector::init_board() {
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+    m_dict = cv::makePtr<cv::aruco::Dictionary>(
+        cv::aruco::getPredefinedDictionary(m_config.dictionary_id));
+
+    m_board = cv::makePtr<cv::aruco::CharucoBoard>(
+        cv::Size(m_config.squares_x, m_config.squares_y),
+        m_config.square_length_mm,
+        m_config.marker_length_mm,
+        *m_dict);
+#else
     m_dict = cv::aruco::getPredefinedDictionary(
         static_cast<cv::aruco::PREDEFINED_DICTIONARY_NAME>(m_config.dictionary_id));
 
@@ -25,8 +35,9 @@ void CharucoDetector::init_board() {
         m_config.square_length_mm,
         m_config.marker_length_mm,
         m_dict);
+#endif
 
-    m_detector_params = cv::aruco::DetectorParameters::create();
+    m_detector_params = cv::makePtr<cv::aruco::DetectorParameters>();
     if (m_config.refine_subpix) {
         m_detector_params->cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
         m_detector_params->cornerRefinementWinSize = 5;
@@ -49,11 +60,43 @@ void CharucoDetector::reset_motion_tracking() {
 }
 
 cv::Point3f CharucoDetector::get_corner_3d(int corner_id) const {
-    if (m_board && corner_id >= 0 && corner_id < static_cast<int>(m_board->chessboardCorners.size())) {
-        return m_board->chessboardCorners[corner_id];
+    if (!m_board) return cv::Point3f(0.0f, 0.0f, 0.0f);
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+    const auto &corners = m_board->getChessboardCorners();
+#else
+    const auto &corners = m_board->chessboardCorners;
+#endif
+    if (corner_id >= 0 && corner_id < static_cast<int>(corners.size())) {
+        return corners[corner_id];
     }
     return cv::Point3f(0.0f, 0.0f, 0.0f);
 }
+
+std::vector<cv::Point3f> CharucoDetector::get_chessboard_corners() const {
+    if (!m_board) return {};
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+    return m_board->getChessboardCorners();
+#else
+    return m_board->chessboardCorners;
+#endif
+}
+
+void CharucoDetector::draw_board(cv::Size out_size, cv::OutputArray img, int margin_size, int border_bits) const {
+    if (!m_board) return;
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+    cv::Mat generated;
+    m_board->generateImage(out_size, generated, margin_size, border_bits);
+    generated.copyTo(img);
+#else
+    m_board->draw(out_size, img, margin_size, border_bits);
+#endif
+}
+
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+#define DVRK_BOARD_REF (*m_board)
+#else
+#define DVRK_BOARD_REF (m_board)
+#endif
 
 bool CharucoDetector::detect_mono(const cv::Mat &image,
                                  MonoDetection &out,
@@ -85,17 +128,17 @@ bool CharucoDetector::detect_mono(const cv::Mat &image,
     }
 
     // Refine rejected markers using board layout
-    cv::aruco::refineDetectedMarkers(gray, m_board, out.marker_corners, out.marker_ids, rejected);
+    cv::aruco::refineDetectedMarkers(gray, DVRK_BOARD_REF, out.marker_corners, out.marker_ids, rejected);
 
     // Interpolate ChArUco corners
     int n_corners = 0;
     if (!camera_matrix.empty() && !dist_coeffs.empty()) {
         n_corners = cv::aruco::interpolateCornersCharuco(
-            out.marker_corners, out.marker_ids, gray, m_board,
+            out.marker_corners, out.marker_ids, gray, DVRK_BOARD_REF,
             out.charuco_corners, out.charuco_ids, camera_matrix, dist_coeffs);
     } else {
         n_corners = cv::aruco::interpolateCornersCharuco(
-            out.marker_corners, out.marker_ids, gray, m_board,
+            out.marker_corners, out.marker_ids, gray, DVRK_BOARD_REF,
             out.charuco_corners, out.charuco_ids);
     }
 
@@ -104,7 +147,7 @@ bool CharucoDetector::detect_mono(const cv::Mat &image,
 
         if (!camera_matrix.empty() && !dist_coeffs.empty()) {
             out.pose_valid = cv::aruco::estimatePoseCharucoBoard(
-                out.charuco_corners, out.charuco_ids, m_board,
+                out.charuco_corners, out.charuco_ids, DVRK_BOARD_REF,
                 camera_matrix, dist_coeffs, out.rvec, out.tvec);
         } else if (out.charuco_corners.size() >= 6) {
             // Uncalibrated stream: estimate board pose using canonical pinhole approximation
@@ -117,7 +160,7 @@ bool CharucoDetector::detect_mono(const cv::Mat &image,
             cv::Mat D_approx = cv::Mat::zeros(1, 5, CV_64F);
             try {
                 out.pose_valid = cv::aruco::estimatePoseCharucoBoard(
-                    out.charuco_corners, out.charuco_ids, m_board,
+                    out.charuco_corners, out.charuco_ids, DVRK_BOARD_REF,
                     K_approx, D_approx, out.rvec, out.tvec);
             } catch (...) {
                 out.pose_valid = false;

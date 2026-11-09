@@ -35,6 +35,7 @@ def write_calibration(path):
     right_projection[0, 3] = -1200.0
     fields = {
         "type": "dvrk_calibration:stereo@1.0.0",
+        "calibration_date": "2026-01-01T00:00:00Z",
         "distortion_model": "plumb_bob",
         "image_width": EYE_WIDTH, "image_height": HEIGHT,
         "K1": camera, "K2": camera,

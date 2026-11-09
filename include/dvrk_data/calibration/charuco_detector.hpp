@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <opencv2/core.hpp>
+#include <opencv2/core/version.hpp>
 #include <opencv2/aruco.hpp>
 #include <opencv2/aruco/charuco.hpp>
 
@@ -94,6 +95,12 @@ public:
 
     /// Lookup 3D object point for a specific ChArUco corner ID (in board frame, mm or meters)
     cv::Point3f get_corner_3d(int corner_id) const;
+
+    /// Lookup all 3D chessboard corners (in board frame)
+    std::vector<cv::Point3f> get_chessboard_corners() const;
+
+    /// Draw board image
+    void draw_board(cv::Size out_size, cv::OutputArray img, int margin_size = 0, int border_bits = 1) const;
 
 private:
     void init_board();

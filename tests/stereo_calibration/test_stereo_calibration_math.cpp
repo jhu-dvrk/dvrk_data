@@ -43,8 +43,7 @@ int main() {
     cv::Mat R_gt = cv::Mat::eye(3, 3, CV_64F);
     cv::Mat T_gt = (cv::Mat_<double>(3, 1) << -6.0, 0.0, 0.0);
 
-    auto board = detector.get_board();
-    const auto &object_pts = board->chessboardCorners;
+    const auto object_pts = detector.get_chessboard_corners();
 
     // Generate 8 diverse synthetic board poses
     std::vector<cv::Vec3d> test_rvecs = {

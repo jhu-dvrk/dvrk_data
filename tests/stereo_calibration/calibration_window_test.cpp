@@ -231,7 +231,7 @@ int main(int argc, char **argv) {
         std::ofstream(diverse_root / name) << "unused by raw image reload\n";
     CharucoDetector detector(fixture.board);
     cv::Mat board_image;
-    detector.get_board()->draw({800,600},board_image,0);
+    detector.draw_board({800,600},board_image,0);
     const cv::Mat K = (cv::Mat_<double>(3,3) << 750,0,320,0,750,240,0,0,1);
     const float width = fixture.board.squares_x*fixture.board.square_length_mm;
     const float height = fixture.board.squares_y*fixture.board.square_length_mm;

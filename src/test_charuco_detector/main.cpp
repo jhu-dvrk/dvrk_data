@@ -63,8 +63,7 @@ int main(int argc, char *argv[]) {
     if (run_synthetic) {
         std::cout << "Creating synthetic stereo frame pair..." << std::endl;
         cv::Mat board_img;
-        auto board = detector.get_board();
-        board->draw(cv::Size(640, 480), board_img, 20, 1);
+        detector.draw_board(cv::Size(640, 480), board_img, 20, 1);
 
         cv::Mat board_bgr;
         cv::cvtColor(board_img, board_bgr, cv::COLOR_GRAY2BGR);
