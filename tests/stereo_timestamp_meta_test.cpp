@@ -137,8 +137,8 @@ int main(int argc, char **argv) {
             check(std::abs(static_cast<int>(left) - static_cast<int>(left_index)) <= 1 &&
                   std::abs(static_cast<int>(right) - static_cast<int>(right_index)) <= 1,
                   "Shifted pixels do not match selected hardware frames");
-            check(last.left_source_ts == 1000 + left_index &&
-                  last.right_source_ts == 2000 + right_index,
+            check(last.left_source_ts == 1000 + static_cast<gint64>(left_index) &&
+                  last.right_source_ts == 2000 + static_cast<gint64>(right_index),
                   "Shifted CPU and hardware timestamps disagree");
         } else {
             check(last.left_reference_timestamps[0].timestamp == left * 1000 &&
